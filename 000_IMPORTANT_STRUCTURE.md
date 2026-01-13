@@ -49,6 +49,7 @@ backend\product-management/
 │   └── vendorPricesTrigger.js
 ├── shared/
 │   ├── barcodeValidator.js
+│   ├── config.js
 │   ├── dataValidator.js
 │   ├── errorHandler.js
 │   ├── firebase.js
@@ -114,6 +115,7 @@ The files in this directory use the following naming convention:
 | `services__vendorPricesProcessor.js` | `services\vendorPricesProcessor.js` |
 | `services__vendorPricesTrigger.js` | `services\vendorPricesTrigger.js` |
 | `shared__barcodeValidator.js` | `shared\barcodeValidator.js` |
+| `shared__config.js` | `shared\config.js` |
 | `shared__dataValidator.js` | `shared\dataValidator.js` |
 | `shared__errorHandler.js` | `shared\errorHandler.js` |
 | `shared__firebase.js` | `shared\firebase.js` |
@@ -140,10 +142,10 @@ The files in this directory use the following naming convention:
 
 ## Quick Reference
 
-- **Total Files**: 45
+- **Total Files**: 46
 - **Source Directory**: `backend\product-management`
 - **Flattened To**: `flattened_2`
-- **Generated**: 2026-01-13T23:02:02.531Z
+- **Generated**: 2026-01-13T23:43:20.786Z
 
 ---
 

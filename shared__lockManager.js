@@ -9,9 +9,7 @@
  */
 
 import { db, FieldValue } from "./firebase.js";
-
-// Lock TTL - should be longer than max expected processing time
-const LOCK_TTL_MS = parseInt(process.env.LOCK_TTL_MS || "1200000"); // 20 minutes
+import { LOCK_TTL_MS } from "./config.js";
 
 /**
  * Get the lock document reference for a globalProduct
@@ -293,4 +291,4 @@ export async function cleanupExpiredLocks(batchSize = 500) {
   return { cleaned, errors };
 }
 
-export { LOCK_TTL_MS, getLockRef };
+export { getLockRef };

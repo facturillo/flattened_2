@@ -1,3 +1,5 @@
+// product-management/server.js
+
 function formatLog(level, args) {
   const timestamp = new Date().toISOString();
   const message = args
@@ -16,9 +18,13 @@ import express from "express";
 import { startPubSubWorkers } from "./shared/pubsubWorker.js";
 import { enhanceProduct } from "./services/productEnhancer.js";
 import { processProduct } from "./services/productProcessor.js";
-import { processGlobalProduct } from "./services/globalProductProcessor.js";
+import {
+  processGlobalProduct,
+  cleanupStaleTemporaryProducts,
+} from "./services/globalProductProcessor.js";
 import { processVendorPrices } from "./services/vendorPricesProcessor.js";
 import { triggerVendorPrices } from "./services/vendorPricesTrigger.js";
+import { cleanupExpiredLocks } from "./shared/lockManager.js";
 
 const WORKER_ROLE = process.env.WORKER_ROLE || "primary";
 
@@ -102,6 +108,30 @@ if (WORKER_ROLE === "primary") {
       res.status(500).json({ error: "Internal server error" });
     }
   });
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // MAINTENANCE ENDPOINTS (for Cloud Scheduler)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  app.post("/cleanup/temporary-products", async (req, res) => {
+    try {
+      const result = await cleanupStaleTemporaryProducts(req.body.batchSize);
+      res.json(result);
+    } catch (error) {
+      console.error("[cleanup/temporary-products] Error:", error.message);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.post("/cleanup/expired-locks", async (req, res) => {
+    try {
+      const result = await cleanupExpiredLocks(req.body.batchSize);
+      res.json(result);
+    } catch (error) {
+      console.error("[cleanup/expired-locks] Error:", error.message);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
 }
 
 const handlers = {};
@@ -110,7 +140,7 @@ if (WORKER_ROLE === "primary") {
   handlers["product-processor-sub"] = processProduct;
   handlers["global-product-processor-sub"] = processGlobalProduct;
   handlers["vendor-prices-processor-sub"] = processVendorPrices;
-  handlers["vendor-prices-trigger-sub"] = triggerVendorPrices; // <-- add this
+  handlers["vendor-prices-trigger-sub"] = triggerVendorPrices;
 } else if (WORKER_ROLE === "batch") {
   handlers["vendor-prices-processor-sub"] = processVendorPrices;
 }

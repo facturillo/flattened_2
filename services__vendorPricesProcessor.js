@@ -1,6 +1,5 @@
 // product-management/services/vendorPricesProcessor.js
 
-import crypto from "crypto";
 import admin, { db, FieldValue, Timestamp } from "../shared/firebase.js";
 import { enhanceProduct } from "./productEnhancer.js";
 import {
@@ -8,16 +7,22 @@ import {
   releaseLock,
   extendLock,
 } from "../shared/lockManager.js";
+import {
+  ALL_BRANDS,
+  BATCH_CONTEXT,
+  generateDocIdSync,
+} from "../shared/config.js";
 
-function generateDocId(input) {
-  return crypto.createHash("sha256").update(input).digest("base64url");
-}
-
+/**
+ * Generate unique request ID for tracking
+ */
 function generateRequestId() {
   return `vp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-// Direct function call instead of HTTP
+/**
+ * Direct function call for product enhancement
+ */
 async function getEnhancedData(brandId, code, productUrl, initialName = null) {
   try {
     const result = await enhanceProduct({
@@ -33,22 +38,13 @@ async function getEnhancedData(brandId, code, productUrl, initialName = null) {
   }
 }
 
-const ALL_BRANDS = [
-  "super99",
-  "elmachetazo",
-  "ribasmith",
-  "superxtra",
-  "supermercadorey",
-  "superbaru",
-  "supercarnes",
-];
-
 // Lock extension interval (extend every 5 minutes to stay within 20-minute TTL)
 const LOCK_EXTENSION_INTERVAL_MS = 5 * 60 * 1000;
 
-// Batch context identifier - used by listeners to skip processing
-const BATCH_CONTEXT = "vendor-prices-batch";
-
+/**
+ * Process vendor prices for a globalProduct
+ * Fetches current prices from all vendors and updates records
+ */
 export async function processVendorPrices({ globalProductId, dateKey }) {
   const requestId = generateRequestId();
   const globalProductRef = db.collection("globalProducts").doc(globalProductId);
@@ -58,8 +54,9 @@ export async function processVendorPrices({ globalProductId, dateKey }) {
   );
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // LOCK ACQUISITION (now uses subcollection - won't trigger listeners)
+  // LOCK ACQUISITION
   // ═══════════════════════════════════════════════════════════════════════════
+
   const lockResult = await tryAcquireLock(globalProductId, requestId);
 
   if (!lockResult.acquired) {
@@ -220,7 +217,6 @@ export async function processVendorPrices({ globalProductId, dateKey }) {
       for (const { brand, lastFetchDate } of failureInfos) {
         if (lastFetchDate && lastFetchDate.toDate() < cutoffDate) {
           const vbRef = globalProductRef.collection("vendorBrands").doc(brand);
-          // Add batch context so listener skips this
           transaction.set(
             vbRef,
             {
@@ -239,14 +235,13 @@ export async function processVendorPrices({ globalProductId, dateKey }) {
         const vbRef = globalProductRef.collection("vendorBrands").doc(brand);
         const vpRef = globalProductRef
           .collection("vendorPrices")
-          .doc(generateDocId(`${brand}_${dateKey}`));
+          .doc(generateDocIdSync(`${brand}_${dateKey}`));
 
         transaction.set(
           vbRef,
           {
             lastFetchDate: FieldValue.serverTimestamp(),
             lastPrice: enhanced.enhancedData.price,
-            // Batch context markers
             _batchContext: BATCH_CONTEXT,
             _batchRequestId: requestId,
             _batchUpdatedAt: FieldValue.serverTimestamp(),
@@ -266,7 +261,7 @@ export async function processVendorPrices({ globalProductId, dateKey }) {
         const vbRef = globalProductRef.collection("vendorBrands").doc(brand);
         const vpRef = globalProductRef
           .collection("vendorPrices")
-          .doc(generateDocId(`${brand}_${dateKey}`));
+          .doc(generateDocIdSync(`${brand}_${dateKey}`));
 
         transaction.set(
           vbRef,
@@ -277,7 +272,6 @@ export async function processVendorPrices({ globalProductId, dateKey }) {
             skuCode: enhanced.skuCode || null,
             lastFetchDate: FieldValue.serverTimestamp(),
             lastPrice: enhanced.enhancedData.price,
-            // Batch context markers
             _batchContext: BATCH_CONTEXT,
             _batchRequestId: requestId,
             _batchUpdatedAt: FieldValue.serverTimestamp(),
@@ -293,18 +287,13 @@ export async function processVendorPrices({ globalProductId, dateKey }) {
       }
 
       // Update globalProduct with bestPrice AND activeVendorBrands
-      // This consolidates what the listener was doing
       const globalProductUpdate = {
-        // Batch context so listener skips
         _batchContext: BATCH_CONTEXT,
         _batchRequestId: requestId,
         _batchUpdatedAt: FieldValue.serverTimestamp(),
+        activeVendorBrands: finalActiveCount,
       };
 
-      // Always update activeVendorBrands (calculated above)
-      globalProductUpdate.activeVendorBrands = finalActiveCount;
-
-      // Update best price if we found a new lowest
       if (newLowest) {
         globalProductUpdate.bestPrice = {
           brandRef: db.collection("vendorBrands").doc(newLowest.brand),
