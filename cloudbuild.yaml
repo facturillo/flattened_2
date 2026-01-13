@@ -1,0 +1,118 @@
+steps:
+  - name: "gcr.io/cloud-builders/gcloud"
+    id: "pre-cleanup"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        echo "Ensuring primary MIG is at target size 1..."
+        gcloud compute instance-groups managed resize product-management-mig \
+          --region=us-central1 \
+          --size=1 \
+          --quiet || true
+        echo "Waiting for primary MIG to stabilize..."
+        gcloud compute instance-groups managed wait-until --stable product-management-mig \
+          --region=us-central1 \
+          --timeout=300 || true
+
+        echo "Checking batch MIG size..."
+        BATCH_SIZE=$$(gcloud compute instance-groups managed describe product-management-batch-mig \
+          --region=us-central1 --format="value(targetSize)" 2>/dev/null || echo "0")
+        echo "$$BATCH_SIZE" > /workspace/batch-size.txt
+        echo "Batch MIG size: $$BATCH_SIZE"
+        echo "Pre-cleanup complete"
+
+  - name: "gcr.io/cloud-builders/docker"
+    id: "build"
+    dir: "product-management"
+    args:
+      - "build"
+      - "-t"
+      - "gcr.io/$PROJECT_ID/product-management:$COMMIT_SHA"
+      - "-t"
+      - "gcr.io/$PROJECT_ID/product-management:latest"
+      - "."
+
+  - name: "gcr.io/cloud-builders/docker"
+    id: "push-sha"
+    args: ["push", "gcr.io/$PROJECT_ID/product-management:$COMMIT_SHA"]
+
+  - name: "gcr.io/cloud-builders/docker"
+    id: "push-latest"
+    args: ["push", "gcr.io/$PROJECT_ID/product-management:latest"]
+
+  - name: "gcr.io/cloud-builders/gcloud"
+    id: "rolling-replace-primary"
+    args:
+      - "compute"
+      - "instance-groups"
+      - "managed"
+      - "rolling-action"
+      - "replace"
+      - "product-management-mig"
+      - "--region=us-central1"
+      - "--max-surge=3"
+      - "--max-unavailable=0"
+      - "--replacement-method=substitute"
+
+  - name: "gcr.io/cloud-builders/gcloud"
+    id: "rolling-replace-batch"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        SIZE=$$(cat /workspace/batch-size.txt)
+        if [ "$$SIZE" -eq "0" ]; then
+          echo "Batch MIG at size 0, skipping rolling replace"
+        else
+          echo "Rolling replace batch MIG..."
+          gcloud compute instance-groups managed rolling-action replace product-management-batch-mig \
+            --region=us-central1 --max-surge=3 --max-unavailable=0 --replacement-method=substitute
+        fi
+
+  - name: "gcr.io/cloud-builders/gcloud"
+    id: "wait-stable-primary"
+    args:
+      - "compute"
+      - "instance-groups"
+      - "managed"
+      - "wait-until"
+      - "--stable"
+      - "product-management-mig"
+      - "--region=us-central1"
+      - "--timeout=600"
+
+  - name: "gcr.io/cloud-builders/gcloud"
+    id: "wait-stable-batch"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        SIZE=$$(cat /workspace/batch-size.txt)
+        if [ "$$SIZE" -eq "0" ]; then
+          echo "Batch MIG at size 0, skipping wait"
+        else
+          echo "Waiting for batch MIG to stabilize..."
+          gcloud compute instance-groups managed wait-until --stable product-management-batch-mig \
+            --region=us-central1 --timeout=600
+        fi
+
+  - name: "gcr.io/cloud-builders/gcloud"
+    id: "post-cleanup"
+    args:
+      - "compute"
+      - "instance-groups"
+      - "managed"
+      - "resize"
+      - "product-management-mig"
+      - "--region=us-central1"
+      - "--size=1"
+
+images:
+  - "gcr.io/$PROJECT_ID/product-management:$COMMIT_SHA"
+  - "gcr.io/$PROJECT_ID/product-management:latest"
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+timeout: "1200s"
