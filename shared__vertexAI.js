@@ -1,14 +1,34 @@
+// product-management/shared/vertexAI.js
+
 import { GoogleGenAI } from "@google/genai";
 import { db } from "./firebase.js";
 
-// Based on 200 requests per minute, the minimum delay between requests is ~300ms.
-const MIN_DELAY = Math.ceil(60000 / 200); // 300ms
+// ═══════════════════════════════════════════════════════════════════════════
+// CONFIGURATION
+// ═══════════════════════════════════════════════════════════════════════════
 
-// Timeout for Vertex AI calls (2 minutes)
+// Rate limiting: 200 requests/min → minimum 300ms between requests
+const MIN_DELAY = Math.ceil(60000 / 200);
+
+// Timeout for Vertex AI calls
 const VERTEX_AI_TIMEOUT_MS = 45000;
 
-// Helper: snip out the first `{…}` block from a string and parse it,
-// or return an empty object on failure.
+// Gemini 3 Flash Preview - optimized for speed and cost
+const GEMINI_MODEL = "gemini-3-flash-preview";
+
+// Fixed seed for reproducible outputs
+const GENERATION_SEED = 42;
+
+const GEMINI_THINKING_LEVEL = "MINIMAL";
+
+// ═══════════════════════════════════════════════════════════════════════════
+// HELPERS
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Extract first JSON object from text string
+ * Fallback parser when direct JSON.parse fails
+ */
 function extractJsonObject(text) {
   const trimmedText = text.trim();
   const start = trimmedText.indexOf("{");
@@ -25,7 +45,7 @@ function extractJsonObject(text) {
 }
 
 /**
- * Helper: Create a timeout promise that rejects after specified ms
+ * Create a timeout promise that rejects after specified milliseconds
  */
 function createTimeoutPromise(ms, operation = "Vertex AI call") {
   return new Promise((_, reject) => {
@@ -35,36 +55,70 @@ function createTimeoutPromise(ms, operation = "Vertex AI call") {
   });
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// VERTEX AI CALL
+// ═══════════════════════════════════════════════════════════════════════════
+
 /**
- * Helper function: vertexAICall
- * Wraps a Vertex AI model.generateContent call with exponential backoff on 429 errors
- * and timeout protection.
+ * Execute Vertex AI generateContent call with retry logic
+ *
+ * Gemini 3 Flash configuration:
+ * - thinkingLevel: MINIMAL (lowest latency, Gemini 3 Flash only)
+ * - temperature: 1.0 (recommended for Gemini 3 to avoid looping)
+ * - seed: fixed for reproducible outputs
+ * - Google Search grounding can now be combined with structured output (Gemini 3 feature)
+ *
+ * @param {string} modelName - Model identifier
+ * @param {string} systemInstruction - System instruction for the model
+ * @param {string} inputString - User input content
+ * @param {Function|null} responseSchema - Schema function or null for free-form
+ * @param {boolean} useGrounding - Whether to enable Google Search grounding
+ * @returns {Promise<{result: Object, modelConfig: Object}>}
  */
 async function vertexAICall(
   modelName,
   systemInstruction,
   inputString,
-  responseSchema
+  responseSchema,
+  useGrounding = false
 ) {
   const maxRetries = 5;
   let attempt = 0;
   let delay = MIN_DELAY;
+
   const ai = new GoogleGenAI({
     vertexai: true,
     project: "panabudget",
-    location: "us-central1",
+    location: "global", // Gemini 3 is available globally
   });
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // BUILD GENERATION CONFIG
+  // ═══════════════════════════════════════════════════════════════════════════
+
   const config = {
     candidateCount: 1,
-    temperature: 0.2,
+    // Gemini 3: temperature 1.0 recommended to avoid looping issues
+    temperature: 1.0,
     topP: 1,
+    // Fixed seed for reproducible outputs
+    seed: GENERATION_SEED,
     systemInstruction,
-    // only add tools when you *don't* have a schema
-    ...(!responseSchema && { tools: [{ googleSearch: {} }] }),
+    // Gemini 3 Flash: MINIMAL thinking level for lowest latency
+    // Options for Flash: MINIMAL, LOW, MEDIUM, HIGH
+    thinkingConfig: {
+      thinkingLevel: GEMINI_THINKING_LEVEL,
+    },
   };
 
+  // Gemini 3 NEW FEATURE: Can combine Google Search grounding WITH structured output!
+  // Previously these were mutually exclusive
+  if (useGrounding) {
+    config.tools = [{ googleSearch: {} }];
+  }
+
+  // Add structured output schema if provided
   if (responseSchema) {
-    // only add these when you *do* have a schema
     config.responseMimeType = "application/json";
     config.responseSchema = responseSchema();
   }
@@ -75,9 +129,12 @@ async function vertexAICall(
     config,
   };
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // RETRY LOOP
+  // ═══════════════════════════════════════════════════════════════════════════
+
   while (attempt < maxRetries) {
     try {
-      // FIX: Add timeout protection to prevent hanging forever
       const result = await Promise.race([
         ai.models.generateContent(modelInput),
         createTimeoutPromise(
@@ -87,15 +144,9 @@ async function vertexAICall(
       ]);
       return { result, modelConfig: config };
     } catch (err) {
-      const errorCode =
-        err.code ||
-        (err.response &&
-          err.response.data &&
-          err.response.data.error &&
-          err.response.data.error.code);
+      const errorCode = err.code || err.response?.data?.error?.code;
 
-      // Check if it's a timeout error
-      const isTimeout = err.message && err.message.includes("timed out");
+      const isTimeout = err.message?.includes("timed out");
 
       if (errorCode === 429 || isTimeout) {
         attempt++;
@@ -104,19 +155,33 @@ async function vertexAICall(
           `Vertex AI call returned ${reason}. Retrying attempt ${attempt} after ${delay}ms...`
         );
         await new Promise((resolve) => setTimeout(resolve, delay));
-        delay *= 2; // exponential backoff
+        delay *= 2; // Exponential backoff
         continue;
       } else {
         throw err;
       }
     }
   }
+
   throw new Error("Max retries exceeded for Vertex AI call");
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// MAIN EXTRACTION FUNCTION
+// ═══════════════════════════════════════════════════════════════════════════
+
 /**
- * Function: vertexAIExtraction
- * Configures the Vertex AI model and processes the extraction response.
+ * Extract structured data using Vertex AI Gemini 3 Flash
+ *
+ * Use cases:
+ * - Category extraction: responseSchema provided, no grounding needed
+ * - Brand detection: no responseSchema, uses Google Search grounding
+ *
+ * @param {string} inputString - Input text to process
+ * @param {string} systemInstruction - System instruction for the model
+ * @param {Function|null} responseSchema - Schema function (null for free-form with grounding)
+ * @param {string} processName - Name for logging/tracking
+ * @returns {Promise<Object|null>} Extracted data or null on error
  */
 async function vertexAIExtraction(
   inputString,
@@ -126,73 +191,112 @@ async function vertexAIExtraction(
 ) {
   let success = true;
   let groundingUsed = false;
+
+  // Use grounding for brand detection (when no schema is provided)
+  // Brand detection needs Google Search to find official brand URLs
+  const useGrounding = !responseSchema;
+
   try {
-    const modelName = "gemini-2.5-flash";
     const { result, modelConfig: rawModel } = await vertexAICall(
-      modelName,
+      GEMINI_MODEL,
       systemInstruction,
       inputString,
-      responseSchema
+      responseSchema,
+      useGrounding
     );
 
     console.log(JSON.stringify(result));
 
     let output = null;
-    if (
-      result &&
-      Array.isArray(result.candidates) &&
-      result.candidates.length > 0 &&
-      result.candidates[0].content &&
-      Array.isArray(result.candidates[0].content.parts) &&
-      result.candidates[0].content.parts.length > 0 &&
-      result.candidates[0].content.parts[0].text
-    ) {
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // PARSE RESPONSE
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    if (result?.candidates?.[0]?.content?.parts?.length > 0) {
+      // Check if grounding was actually used
       if (result.candidates[0].groundingMetadata) {
         groundingUsed = true;
       }
-      const fullText = result.candidates[0].content.parts
-        .map((p) => p.text)
-        .join("");
-      try {
-        if (responseSchema) {
-          try {
-            output = JSON.parse(fullText);
-          } catch (err) {
-            console.warn(
-              "Direct JSON.parse failed, falling back to snip:",
-              err
-            );
+
+      // Filter out thinking parts (Gemini 3 includes thought signatures)
+      const textParts = result.candidates[0].content.parts.filter(
+        (p) => p.text && !p.thought
+      );
+
+      if (textParts.length > 0) {
+        const fullText = textParts.map((p) => p.text).join("");
+
+        try {
+          if (responseSchema) {
+            // Structured output mode - expect valid JSON
+            try {
+              output = JSON.parse(fullText);
+            } catch (err) {
+              console.warn(
+                "Direct JSON.parse failed, falling back to extraction:",
+                err
+              );
+              output = extractJsonObject(fullText);
+            }
+          } else {
+            // Free-form mode (brand detection) - extract JSON from response
             output = extractJsonObject(fullText);
           }
-        } else {
+        } catch (parseErr) {
+          console.error("Error parsing Vertex AI response:", parseErr);
           output = extractJsonObject(fullText);
         }
-      } catch (parseErr) {
-        console.error("Error parsing Vertex AI response:", parseErr);
-        output = extractJsonObject(fullText);
+
+        console.log("Vertex AI Response:", output);
+      } else {
+        console.log("No text parts returned from Vertex AI for extraction.");
+        output = {};
+        success = false;
       }
-      console.log("Vertex AI Response:", output);
     } else {
       console.log("No candidates returned from Vertex AI for extraction.");
       output = {};
       success = false;
     }
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // LOG TOKEN USAGE
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    if (result?.usageMetadata) {
+      console.log("Token usage:", {
+        promptTokens: result.usageMetadata.promptTokenCount || 0,
+        candidatesTokens: result.usageMetadata.candidatesTokenCount || 0,
+        thinkingTokens: result.usageMetadata.thoughtsTokenCount || 0,
+        totalTokens: result.usageMetadata.totalTokenCount || 0,
+      });
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // SAVE RUN LOG
+    // ═══════════════════════════════════════════════════════════════════════════
+
     await db
       .collection("vertexAIRuns")
       .doc()
       .set({
         process: processName,
-        modelName: modelName,
+        modelName: GEMINI_MODEL,
         systemInstructions: systemInstruction,
         responseSchema: JSON.stringify(responseSchema ? responseSchema() : {}),
-        groundingRequested: !responseSchema,
+        groundingRequested: useGrounding,
         groundingUsed,
         rawModel: JSON.stringify(rawModel),
         rawResult: JSON.stringify(result),
         output: JSON.stringify(output),
         success,
+        // Gemini 3 specific metadata
+        thinkingLevel: GEMINI_THINKING_LEVEL,
+        seed: GENERATION_SEED,
+        temperature: 1.0,
       });
+
     return output;
   } catch (err) {
     console.error("Error calling Vertex AI for extraction:", err);
