@@ -5,7 +5,7 @@ import { db } from "./firebase.js";
 const MIN_DELAY = Math.ceil(60000 / 200); // 300ms
 
 // Timeout for Vertex AI calls (2 minutes)
-const VERTEX_AI_TIMEOUT_MS = 120000;
+const VERTEX_AI_TIMEOUT_MS = 45000;
 
 // Helper: snip out the first `{…}` block from a string and parse it,
 // or return an empty object on failure.

@@ -1,3 +1,5 @@
+// productDataExtractors/methods.js
+
 import * as cheerio from "cheerio";
 import { runInNewContext } from "vm";
 import { ProductResponse } from "../services/productEnhancer.js";
@@ -238,9 +240,9 @@ export async function algolia(
       );
     }
 
-    let APP_ID = defaultAppId ? defaultAppId : null,
-      API_KEY = defaultApiKey ? defaultApiKey : null,
-      INDEX = defaultIndex ? defaultIndex : null;
+    let APP_ID = defaultAppId ?? null;
+    let API_KEY = defaultApiKey ?? null;
+    let INDEX = defaultIndex ?? null;
 
     if (!APP_ID || !API_KEY || !INDEX) {
       const searchPageUrl = `${baseDomain}/catalogsearch/result/?q=${encodeURIComponent(
@@ -266,9 +268,9 @@ export async function algolia(
       try {
         const cfg = JSON.parse(match[1]);
         const { applicationId, apiKey, indexName } = cfg;
-        APP_ID = applicationId ? applicationId : null;
-        API_KEY = apiKey ? apiKey : null;
-        INDEX = indexName ? indexName : null;
+        APP_ID = applicationId ?? null;
+        API_KEY = apiKey ?? null;
+        INDEX = indexName ?? null;
       } catch (err) {
         console.warn(
           `[${context.brandId}/${barcode}] Failed to parse algoliaConfig:`,
@@ -276,6 +278,14 @@ export async function algolia(
         );
         return null;
       }
+    }
+
+    // FIX: Guard against null/empty credentials after page parse
+    if (!APP_ID || !API_KEY || !INDEX) {
+      console.debug(
+        `[${context.brandId}/${barcode}] Missing Algolia credentials after page parse`
+      );
+      return null;
     }
 
     const endpoint = `https://${APP_ID.toLowerCase()}-dsn.algolia.net/1/indexes/*/queries?x-algolia-application-id=${APP_ID}&x-algolia-api-key=${API_KEY}`;

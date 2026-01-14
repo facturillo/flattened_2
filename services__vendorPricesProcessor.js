@@ -385,14 +385,6 @@ export async function processVendorPrices({ globalProductId, dateKey }) {
         }
       }
 
-      // Add newly created brands
-      for (const hit of missingHits) {
-        const docInfo = freshVendorBrandDocs.get(hit.brand);
-        if (!docInfo || !docInfo.exists) {
-          finalActiveCount++;
-        }
-      }
-
       // Update globalProduct with bestPrice AND activeVendorBrands
       const globalProductUpdate = {
         _batchContext: BATCH_CONTEXT,
