@@ -26,7 +26,7 @@ const pubsub = new PubSub();
  * Prevents duplicate Vertex AI calls when multiple enhancers succeed
  */
 const processingTracker = new Map();
-const TRACKER_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const TRACKER_TTL_MS = 5 * 60 * 1000;
 
 function getTrackerKey(globalProductId) {
   return `gp_${globalProductId}`;
@@ -38,7 +38,6 @@ function isAlreadyProcessing(globalProductId) {
 
   if (!entry) return false;
 
-  // Check if entry is stale
   if (Date.now() - entry.startedAt > TRACKER_TTL_MS) {
     processingTracker.delete(key);
     return false;
@@ -60,7 +59,6 @@ function markProcessingComplete(globalProductId) {
   processingTracker.delete(key);
 }
 
-// Cleanup stale tracker entries periodically
 setInterval(() => {
   const now = Date.now();
   for (const [key, entry] of processingTracker) {
@@ -72,6 +70,7 @@ setInterval(() => {
 
 /**
  * Direct function call instead of HTTP - used for internal enhancement
+ * Uses skipBarcodeExpansion since codes come from eanCodeVariations (already expanded)
  */
 async function getEnhancedData(brandId, code, initialName, globalProductId) {
   try {
@@ -80,6 +79,7 @@ async function getEnhancedData(brandId, code, initialName, globalProductId) {
       code,
       initialName,
       globalProductId,
+      skipBarcodeExpansion: true,
     });
     return result;
   } catch (err) {
@@ -90,11 +90,8 @@ async function getEnhancedData(brandId, code, initialName, globalProductId) {
 
 /**
  * Track enhancement results for a globalProduct
- * FIX: Correctly count successes/failures based on the actual result structure
  */
 async function trackEnhancementResults(globalProductRef, results) {
-  // FIX: The promises are wrapped with .catch(), so they always fulfill.
-  // Check for r.value.result (the actual enhancement result) instead of r.value
   const succeeded = results.filter(
     (r) => r.status === "fulfilled" && r.value && r.value.result
   );
@@ -127,7 +124,7 @@ export async function processGlobalProduct({
   globalProductId,
   enhancedDataInput,
   processAfter,
-  _idempotencyKey, // For deduplication
+  _idempotencyKey,
 }) {
   const requestId = `gpp-${Date.now()}-${Math.random()
     .toString(36)
@@ -198,7 +195,6 @@ export async function processGlobalProduct({
         }
       }
 
-      // Don't await - let them run in background, but track results
       Promise.allSettled(enhancementPromises)
         .then((results) => trackEnhancementResults(globalProductRef, results))
         .catch((err) =>
@@ -254,10 +250,6 @@ export async function processGlobalProduct({
           `[${requestId}] Enhancement callback for ${globalProductId}`
         );
 
-        // ═══════════════════════════════════════════════════════════════════════
-        // RACE CONDITION FIX: Atomic claim to prevent duplicate AI calls
-        // ═══════════════════════════════════════════════════════════════════════
-
         const claimResult = await db.runTransaction(async (transaction) => {
           const doc = await transaction.get(globalProductRef);
 
@@ -267,17 +259,14 @@ export async function processGlobalProduct({
 
           const data = doc.data();
 
-          // Already processed?
           if (data.processed === true) {
             return { won: false, reason: "already_processed" };
           }
 
-          // Already claimed by another request?
           if (data._processingClaimed) {
             const claimTime = data._processingClaimedAt?.toMillis?.() || 0;
             const claimAge = Date.now() - claimTime;
 
-            // Allow override if claim is stale (> 5 minutes)
             if (claimAge < 5 * 60 * 1000) {
               return {
                 won: false,
@@ -291,7 +280,6 @@ export async function processGlobalProduct({
             );
           }
 
-          // Claim it
           transaction.update(globalProductRef, {
             _processingClaimed: requestId,
             _processingClaimedAt: FieldValue.serverTimestamp(),
@@ -310,7 +298,6 @@ export async function processGlobalProduct({
           return { status: 200, message: claimResult.reason };
         }
 
-        // In-memory secondary guard
         if (isAlreadyProcessing(globalProductId)) {
           console.log(`[${requestId}] Already processing in-memory, skipping`);
           return { status: 200, message: "Already processing in memory" };
@@ -327,7 +314,6 @@ export async function processGlobalProduct({
     Enhanced Product Data: ${JSON.stringify(enhancedDataInput.enhancedData)}`;
         shouldComplete = true;
       } else {
-        // Delayed reprocessing - check if still temporary
         console.log(
           `[${requestId}] Delayed reprocessing check for ${globalProductId}`
         );
@@ -341,17 +327,14 @@ export async function processGlobalProduct({
 
           const globalProductData = globalProductDoc.data();
 
-          // If already processed, nothing to do
           if (globalProductData.processed === true) {
             return { action: "already_processed" };
           }
 
-          // If no longer temporary, someone else handled it
           if (globalProductData.temporary === false) {
             return { action: "no_longer_temporary" };
           }
 
-          // Still temporary after delay - clean up
           console.log(`[${requestId}] Cleaning up stale temporary product`);
 
           const historyQuery = db
@@ -396,7 +379,7 @@ export async function processGlobalProduct({
         const brandPromise = vertexAIExtraction(
           productInputString,
           brandInstruction,
-          brandResponseSchema, // <-- Now uses structured output
+          brandResponseSchema,
           "globalProductBrand"
         );
 
@@ -422,7 +405,6 @@ export async function processGlobalProduct({
             return;
           }
 
-          // Double-check we haven't been beaten by another processor
           const currentData = globalProductSnap.data();
           if (currentData.processed === true) {
             console.log(
@@ -462,7 +444,7 @@ export async function processGlobalProduct({
               category: productCategory || "other",
               productInputString: FieldValue.delete(),
               temporary: false,
-              _processingClaimed: FieldValue.delete(), // Clean up claim
+              _processingClaimed: FieldValue.delete(),
               _processedBy: requestId,
             },
             { merge: true }
@@ -479,7 +461,6 @@ export async function processGlobalProduct({
   } catch (error) {
     console.error(`[${requestId}] Error during processing:`, error);
 
-    // Clean up tracking on error
     if (globalProductId) {
       markProcessingComplete(globalProductId);
     }
@@ -494,7 +475,6 @@ export async function processGlobalProduct({
 
 /**
  * Cleanup job for stale temporary globalProducts
- * Should be called via Cloud Scheduler (e.g., hourly)
  */
 export async function cleanupStaleTemporaryProducts(batchSize = 500) {
   const requestId = `cleanup-${Date.now()}`;
@@ -533,11 +513,9 @@ export async function cleanupStaleTemporaryProducts(batchSize = 500) {
 
           const data = freshDoc.data();
 
-          // Re-verify it's still temporary and old
           if (data.temporary !== true) return;
           if (data.createDate?.toDate() >= cutoffTime) return;
 
-          // Delete associated history
           const historyQuery = db
             .collectionGroup("productSearchHistory")
             .where("globalProductRef", "==", doc.ref);

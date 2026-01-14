@@ -1,5 +1,5 @@
 steps:
-  - name: "gcr.io/cloud-builders/gcloud"
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk:slim"
     id: "pre-cleanup"
     entrypoint: "bash"
     args:
@@ -41,8 +41,9 @@ steps:
     id: "push-latest"
     args: ["push", "gcr.io/$PROJECT_ID/product-management:latest"]
 
-  - name: "gcr.io/cloud-builders/gcloud"
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk:slim"
     id: "rolling-replace-primary"
+    entrypoint: "gcloud"
     args:
       - "compute"
       - "instance-groups"
@@ -55,7 +56,7 @@ steps:
       - "--max-unavailable=0"
       - "--replacement-method=substitute"
 
-  - name: "gcr.io/cloud-builders/gcloud"
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk:slim"
     id: "rolling-replace-batch"
     entrypoint: "bash"
     args:
@@ -70,8 +71,9 @@ steps:
             --region=us-central1 --max-surge=3 --max-unavailable=0 --replacement-method=substitute
         fi
 
-  - name: "gcr.io/cloud-builders/gcloud"
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk:slim"
     id: "wait-stable-primary"
+    entrypoint: "gcloud"
     args:
       - "compute"
       - "instance-groups"
@@ -82,7 +84,7 @@ steps:
       - "--region=us-central1"
       - "--timeout=600"
 
-  - name: "gcr.io/cloud-builders/gcloud"
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk:slim"
     id: "wait-stable-batch"
     entrypoint: "bash"
     args:
@@ -97,8 +99,9 @@ steps:
             --region=us-central1 --timeout=600
         fi
 
-  - name: "gcr.io/cloud-builders/gcloud"
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk:slim"
     id: "post-cleanup"
+    entrypoint: "gcloud"
     args:
       - "compute"
       - "instance-groups"

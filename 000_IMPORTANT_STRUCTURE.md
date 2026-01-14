@@ -67,6 +67,7 @@ backend\product-management/
 ├── Dockerfile
 ├── package.json
 ├── README.md
+├── rollback-cloudbuild.yaml
 └── server.js
 ```
 
@@ -107,6 +108,7 @@ The files in this directory use the following naming convention:
 | `productDataExtractors__webPixels__melo.js` | `productDataExtractors\webPixels\melo.js` |
 | `productDataExtractors__webPixels__superBaru.js` | `productDataExtractors\webPixels\superBaru.js` |
 | `README.md` | `README.md` |
+| `rollback-cloudbuild.yaml` | `rollback-cloudbuild.yaml` |
 | `server.js` | `server.js` |
 | `services__globalProductProcessor.js` | `services\globalProductProcessor.js` |
 | `services__productEnhancer.js` | `services\productEnhancer.js` |
@@ -140,10 +142,10 @@ The files in this directory use the following naming convention:
 
 ## Quick Reference
 
-- **Total Files**: 45
+- **Total Files**: 46
 - **Source Directory**: `backend\product-management`
 - **Flattened To**: `flattened_2`
-- **Generated**: 2026-01-14T01:48:39.304Z
+- **Generated**: 2026-01-14T18:10:56.501Z
 
 ---
 

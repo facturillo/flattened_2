@@ -22,14 +22,22 @@ function generateRequestId() {
 
 /**
  * Direct function call for product enhancement
+ * @param {boolean} skipBarcodeExpansion - Skip variant expansion (batch mode)
  */
-async function getEnhancedData(brandId, code, productUrl, initialName = null) {
+async function getEnhancedData(
+  brandId,
+  code,
+  productUrl,
+  initialName = null,
+  skipBarcodeExpansion = false
+) {
   try {
     const result = await enhanceProduct({
       brandId,
       code,
       initialName,
       productUrl,
+      skipBarcodeExpansion,
     });
     return result?.enhancedProductData ? result : null;
   } catch (error) {
@@ -100,7 +108,6 @@ export async function processVendorPrices({ globalProductId, dateKey }) {
   try {
     // ═══════════════════════════════════════════════════════════════════════════
     // PHASE 1: INITIAL READS (outside transaction - for external API calls)
-    // These reads inform which external APIs to call, not transaction writes
     // ═══════════════════════════════════════════════════════════════════════════
 
     const masterSnap = await globalProductRef.get();
@@ -130,6 +137,7 @@ export async function processVendorPrices({ globalProductId, dateKey }) {
     // ═══════════════════════════════════════════════════════════════════════════
 
     // Enhance each existing vendorBrand (using skuCode + URL)
+    // These use URL directly, so no variant expansion needed
     const existingBrandsToEnhance = initialVendorBrandsSnap.docs.map((doc) => ({
       brand: doc.id,
       skuCode: doc.data().skuCode,
@@ -139,7 +147,14 @@ export async function processVendorPrices({ globalProductId, dateKey }) {
     const existingEnhancementPromises = existingBrandsToEnhance.map(
       async ({ brand, skuCode, url }) => {
         try {
-          const result = await getEnhancedData(brand, skuCode || null, url);
+          // URL-based lookup: skip expansion since we have direct URL
+          const result = await getEnhancedData(
+            brand,
+            skuCode || null,
+            url,
+            null,
+            true
+          );
           const enhanced = result?.enhancedProductData;
           const price = enhanced?.enhancedData?.price;
           if (price && price !== 0) {
@@ -167,8 +182,16 @@ export async function processVendorPrices({ globalProductId, dateKey }) {
     const missingEnhancementPromises = brandsToSearch.map(async (brand) => {
       if (eanVariants.length === 0) return null;
 
+      // BATCH MODE: skipBarcodeExpansion = true
+      // We already have all variants in eanVariants, don't expand again
       const attempts = eanVariants.map(async (code) => {
-        const result = await getEnhancedData(brand, code, null, globalName);
+        const result = await getEnhancedData(
+          brand,
+          code,
+          null,
+          globalName,
+          true
+        );
         const enhanced = result?.enhancedProductData;
         const price = enhanced?.enhancedData?.price;
 
@@ -210,7 +233,6 @@ export async function processVendorPrices({ globalProductId, dateKey }) {
 
     // ═══════════════════════════════════════════════════════════════════════════
     // PHASE 3: TRANSACTION (atomic reads + writes)
-    // Re-read vendorBrands inside transaction for consistency
     // ═══════════════════════════════════════════════════════════════════════════
 
     const transactionResult = await db.runTransaction(async (transaction) => {
@@ -221,7 +243,6 @@ export async function processVendorPrices({ globalProductId, dateKey }) {
       }
 
       // Re-read ALL vendorBrands (not just active) to get fresh state
-      // Note: We read all docs individually since we need transaction consistency
       const vendorBrandsRef = globalProductRef.collection("vendorBrands");
 
       // Get all vendorBrand doc IDs we might need to read/write

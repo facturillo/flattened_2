@@ -38,7 +38,6 @@ async function continueGlobalProductProcessing(
   enhancedDataInput
 ) {
   try {
-    // Quick check: is it already processed?
     const globalProductRef = db
       .collection("globalProducts")
       .doc(globalProductId);
@@ -53,7 +52,6 @@ async function continueGlobalProductProcessing(
 
     const gpData = gpDoc.data();
 
-    // Skip if already processed
     if (gpData.processed === true) {
       console.log(
         `[enhancer/${globalProductId}] Already processed, skipping AI trigger`
@@ -61,7 +59,6 @@ async function continueGlobalProductProcessing(
       return;
     }
 
-    // Skip if no longer temporary (another enhancer already triggered processing)
     if (gpData.temporary === false && gpData._processingClaimed) {
       console.log(
         `[enhancer/${globalProductId}] Processing already claimed, skipping`
@@ -69,7 +66,6 @@ async function continueGlobalProductProcessing(
       return;
     }
 
-    // Import dynamically to avoid circular dependency
     const { processGlobalProduct } = await import(
       "./globalProductProcessor.js"
     );
@@ -95,6 +91,7 @@ async function continueGlobalProductProcessing(
  * @param {string} params.initialName - Initial product name
  * @param {string} params.productUrl - Direct product URL (optional)
  * @param {string} params.globalProductId - Associated globalProduct ID (optional)
+ * @param {boolean} params.skipBarcodeExpansion - Skip barcode variant expansion (when codes already come from eanCodeVariations)
  * @returns {Promise<{enhancedProductData: ProductResponse|null, barcodeResults: Array}>}
  */
 export async function enhanceProduct({
@@ -103,6 +100,7 @@ export async function enhanceProduct({
   initialName,
   productUrl,
   globalProductId,
+  skipBarcodeExpansion = false,
 }) {
   const requestId = `enh-${Date.now()}-${Math.random()
     .toString(36)
@@ -124,7 +122,11 @@ export async function enhanceProduct({
   // FULL ENHANCEMENT
   // ═══════════════════════════════════════════════════════════════════════════
 
-  const barcodeTypes = getBarcodeTypes(normalizedCode) ?? [];
+  // When skipBarcodeExpansion is true, the caller already has all variants
+  // (e.g., from eanCodeVariations). Use the code directly without re-expanding.
+  const barcodeTypes = skipBarcodeExpansion
+    ? [{ barcode: normalizedCode, barcodeType: "DIRECT" }]
+    : getBarcodeTypes(normalizedCode) ?? [];
 
   let enhancedProductData = null;
 
@@ -188,7 +190,6 @@ export async function enhanceProduct({
 
           const globalProductData = globalProductSnap.data();
 
-          // Create/update vendorBrand
           if (!vendorBrandSnap.exists) {
             transaction.set(
               vendorBrandRef,
@@ -205,18 +206,16 @@ export async function enhanceProduct({
               { merge: true }
             );
 
-            // Increment active vendor count
             transaction.update(globalProductRef, {
               activeVendorBrands: FieldValue.increment(1),
             });
           } else {
-            // Update existing vendorBrand
             transaction.set(
               vendorBrandRef,
               {
                 lastFetchDate: FieldValue.serverTimestamp(),
                 lastPrice: enhancedProductData.enhancedData.price,
-                url: enhancedProductData.url, // Update URL in case it changed
+                url: enhancedProductData.url,
                 _updatedBy: ENHANCEMENT_CONTEXT,
                 _updatedAt: FieldValue.serverTimestamp(),
               },
@@ -224,7 +223,6 @@ export async function enhanceProduct({
             );
           }
 
-          // Create today's price record if not exists
           if (!vendorPriceSnap.exists) {
             transaction.set(
               vendorPriceRef,
@@ -238,8 +236,6 @@ export async function enhanceProduct({
             );
           }
 
-          // Return whether we should trigger AI processing
-          // Only trigger if still temporary AND not already being processed
           return (
             globalProductData.temporary === true &&
             globalProductData.processed !== true &&
@@ -247,13 +243,11 @@ export async function enhanceProduct({
           );
         });
 
-        // Trigger AI processing if needed (outside transaction)
         if (shouldContinue) {
           console.log(
             `[${requestId}] Triggering AI processing for ${globalProductId}`
           );
 
-          // Fire and forget, but with proper error handling
           continueGlobalProductProcessing(
             globalProductId,
             enhancedProductData
@@ -269,7 +263,6 @@ export async function enhanceProduct({
           `[${requestId}] Transaction error for ${globalProductId}:`,
           err.message
         );
-        // Don't throw - enhancement succeeded, just association failed
       }
     }
   }

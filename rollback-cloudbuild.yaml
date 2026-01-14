@@ -1,0 +1,253 @@
+# rollback-cloudbuild.yaml
+#
+# Usage:
+#   gcloud builds submit --config=rollback-cloudbuild.yaml --no-source
+#
+# With specific commit SHA:
+#   gcloud builds submit --config=rollback-cloudbuild.yaml --no-source \
+#     --substitutions=_COMMIT_SHA=abc1234def
+#
+# Force restart mode (scales to 0, then back up - use if instances are stuck):
+#   gcloud builds submit --config=rollback-cloudbuild.yaml --no-source \
+#     --substitutions=_ROLLBACK_METHOD=restart
+
+steps:
+  # Step 1: Determine rollback image
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk:slim"
+    id: "determine-image"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        ROLLBACK_SHA="${_COMMIT_SHA}"
+
+        if [ -z "$$ROLLBACK_SHA" ]; then
+          echo "No commit SHA specified, finding previous deployment..."
+          
+          # List images sorted by timestamp, extract commit SHAs (not 'latest')
+          # Get the second most recent (skip current deployment)
+          ROLLBACK_SHA=$(gcloud container images list-tags gcr.io/$PROJECT_ID/product-management \
+            --sort-by=~timestamp \
+            --limit=10 \
+            --format="value(tags)" \
+            | tr ',' '\n' \
+            | grep -v '^latest$' \
+            | grep -v '^$' \
+            | head -2 \
+            | tail -1)
+        fi
+
+        if [ -z "$$ROLLBACK_SHA" ]; then
+          echo "ERROR: Could not determine rollback image"
+          echo "Available images:"
+          gcloud container images list-tags gcr.io/$PROJECT_ID/product-management \
+            --sort-by=~timestamp \
+            --limit=10
+          exit 1
+        fi
+
+        # Verify the image exists
+        if ! gcloud container images describe gcr.io/$PROJECT_ID/product-management:$$ROLLBACK_SHA &>/dev/null; then
+          echo "ERROR: Image gcr.io/$PROJECT_ID/product-management:$$ROLLBACK_SHA not found"
+          exit 1
+        fi
+
+        echo "$$ROLLBACK_SHA" > /workspace/rollback_sha.txt
+        echo "Will roll back to: gcr.io/$PROJECT_ID/product-management:$$ROLLBACK_SHA"
+
+  # Step 2: Retag the image as :latest
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk:slim"
+    id: "retag-image"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        ROLLBACK_SHA=$$(cat /workspace/rollback_sha.txt)
+
+        echo "Tagging gcr.io/$PROJECT_ID/product-management:$$ROLLBACK_SHA as :latest"
+
+        gcloud container images add-tag \
+          gcr.io/$PROJECT_ID/product-management:$$ROLLBACK_SHA \
+          gcr.io/$PROJECT_ID/product-management:latest \
+          --quiet
+
+        echo "Image retagged successfully"
+
+  # Step 3: Check batch MIG size (it might be 0)
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk:slim"
+    id: "check-batch-size"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        BATCH_SIZE=$$(gcloud compute instance-groups managed describe product-management-batch-mig \
+          --region=us-central1 \
+          --project=$PROJECT_ID \
+          --format="value(targetSize)" 2>/dev/null || echo "0")
+
+        echo "$$BATCH_SIZE" > /workspace/batch-size.txt
+        echo "Batch MIG current size: $$BATCH_SIZE"
+
+  # Step 4: Execute rollback based on method
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk:slim"
+    id: "execute-rollback"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        ROLLBACK_METHOD="${_ROLLBACK_METHOD}"
+        BATCH_SIZE=$$(cat /workspace/batch-size.txt)
+
+        if [ "$$ROLLBACK_METHOD" = "restart" ]; then
+          echo "========================================"
+          echo "RESTART MODE: Scaling down to 0, then back up"
+          echo "========================================"
+          
+          # Scale down primary MIG
+          echo "Scaling down primary MIG..."
+          gcloud compute instance-groups managed resize product-management-mig \
+            --region=us-central1 \
+            --size=0 \
+            --project=$PROJECT_ID
+          
+          # Scale down batch MIG if running
+          if [ "$$BATCH_SIZE" -gt "0" ]; then
+            echo "Scaling down batch MIG..."
+            gcloud compute instance-groups managed resize product-management-batch-mig \
+              --region=us-central1 \
+              --size=0 \
+              --project=$PROJECT_ID
+          fi
+          
+          # Wait for both to be empty
+          echo "Waiting for primary MIG to be empty..."
+          gcloud compute instance-groups managed wait-until --stable product-management-mig \
+            --region=us-central1 \
+            --timeout=180 \
+            --project=$PROJECT_ID
+          
+          if [ "$$BATCH_SIZE" -gt "0" ]; then
+            echo "Waiting for batch MIG to be empty..."
+            gcloud compute instance-groups managed wait-until --stable product-management-batch-mig \
+              --region=us-central1 \
+              --timeout=180 \
+              --project=$PROJECT_ID
+          fi
+          
+          echo "MIGs scaled to 0"
+          
+          # Scale back up primary MIG
+          echo "Scaling up primary MIG..."
+          gcloud compute instance-groups managed resize product-management-mig \
+            --region=us-central1 \
+            --size=1 \
+            --project=$PROJECT_ID
+          
+          # Scale back up batch MIG if it was running
+          if [ "$$BATCH_SIZE" -gt "0" ]; then
+            echo "Scaling up batch MIG to $$BATCH_SIZE..."
+            gcloud compute instance-groups managed resize product-management-batch-mig \
+              --region=us-central1 \
+              --size=$$BATCH_SIZE \
+              --project=$PROJECT_ID
+          fi
+          
+        else
+          echo "========================================"
+          echo "ROLLING MODE: Zero-downtime rolling replace"
+          echo "========================================"
+          
+          # Rolling replace primary MIG
+          echo "Rolling replace primary MIG..."
+          gcloud compute instance-groups managed rolling-action replace product-management-mig \
+            --region=us-central1 \
+            --max-surge=3 \
+            --max-unavailable=0 \
+            --replacement-method=substitute \
+            --project=$PROJECT_ID
+          
+          # Rolling replace batch MIG if running
+          if [ "$$BATCH_SIZE" -gt "0" ]; then
+            echo "Rolling replace batch MIG..."
+            gcloud compute instance-groups managed rolling-action replace product-management-batch-mig \
+              --region=us-central1 \
+              --max-surge=3 \
+              --max-unavailable=0 \
+              --replacement-method=substitute \
+              --project=$PROJECT_ID
+          fi
+        fi
+
+  # Step 5: Wait for primary MIG to stabilize
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk:slim"
+    id: "wait-stable-primary"
+    entrypoint: "gcloud"
+    args:
+      - "compute"
+      - "instance-groups"
+      - "managed"
+      - "wait-until"
+      - "--stable"
+      - "product-management-mig"
+      - "--region=us-central1"
+      - "--timeout=600"
+
+  # Step 6: Wait for batch MIG to stabilize (if running)
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk:slim"
+    id: "wait-stable-batch"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        SIZE=$$(cat /workspace/batch-size.txt)
+        if [ "$$SIZE" -eq "0" ]; then
+          echo "Batch MIG at size 0, skipping wait"
+        else
+          echo "Waiting for batch MIG to stabilize..."
+          gcloud compute instance-groups managed wait-until --stable product-management-batch-mig \
+            --region=us-central1 \
+            --timeout=600 \
+            --project=$PROJECT_ID
+        fi
+
+  # Step 7: Final status
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk:slim"
+    id: "final-status"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        ROLLBACK_SHA=$$(cat /workspace/rollback_sha.txt)
+
+        echo ""
+        echo "========================================"
+        echo "ROLLBACK COMPLETE"
+        echo "========================================"
+        echo ""
+        echo "Rolled back to: gcr.io/$PROJECT_ID/product-management:$$ROLLBACK_SHA"
+        echo ""
+        echo "Primary MIG:"
+        gcloud compute instance-groups managed list-instances product-management-mig \
+          --region=us-central1 \
+          --project=$PROJECT_ID \
+          --format="table(instance,status,lastAttempt.errors.errors[0].code)"
+        echo ""
+        echo "Batch MIG:"
+        gcloud compute instance-groups managed list-instances product-management-batch-mig \
+          --region=us-central1 \
+          --project=$PROJECT_ID \
+          --format="table(instance,status,lastAttempt.errors.errors[0].code)" 2>/dev/null || echo "(size 0 or not found)"
+        echo ""
+        echo "Health check status:"
+        gcloud compute backend-services get-health product-management-backend \
+          --region=us-central1 \
+          --project=$PROJECT_ID 2>/dev/null || echo "(checking...)"
+
+substitutions:
+  _COMMIT_SHA: "" # Optional: specific commit SHA to roll back to (auto-detects if empty)
+  _ROLLBACK_METHOD: "rolling" # "rolling" (default, zero-downtime) or "restart" (scales to 0 first)
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+timeout: "900s"
