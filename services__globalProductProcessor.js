@@ -90,10 +90,17 @@ async function getEnhancedData(brandId, code, initialName, globalProductId) {
 
 /**
  * Track enhancement results for a globalProduct
+ * FIX: Correctly count successes/failures based on the actual result structure
  */
 async function trackEnhancementResults(globalProductRef, results) {
-  const succeeded = results.filter((r) => r.status === "fulfilled" && r.value);
-  const failed = results.filter((r) => r.status === "rejected" || !r.value);
+  // FIX: The promises are wrapped with .catch(), so they always fulfill.
+  // Check for r.value.result (the actual enhancement result) instead of r.value
+  const succeeded = results.filter(
+    (r) => r.status === "fulfilled" && r.value && r.value.result
+  );
+  const failed = results.filter(
+    (r) => r.status === "rejected" || !r.value || !r.value.result
+  );
 
   try {
     await globalProductRef.collection("_metadata").doc("enhancement").set(
@@ -181,7 +188,12 @@ export async function processGlobalProduct({
           enhancementPromises.push(
             getEnhancedData(brand, code, initialName, globalProductRef.id)
               .then((result) => ({ brand, code, result }))
-              .catch((err) => ({ brand, code, error: err.message }))
+              .catch((err) => ({
+                brand,
+                code,
+                error: err.message,
+                result: null,
+              }))
           );
         }
       }

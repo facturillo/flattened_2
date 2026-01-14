@@ -9,6 +9,9 @@ import {
 } from "../../shared/dataValidator.js";
 import { withErrorHandling } from "../../shared/errorHandler.js";
 
+// FIX: Limit the number of templates to check to prevent unbounded loops
+const MAX_TEMPLATES_TO_CHECK = 100;
+
 export async function getProductData(
   website,
   barcode,
@@ -69,7 +72,17 @@ export async function getProductData(
 
     if (templateIds.size === 0) return null;
 
+    // FIX: Limit the number of templates to check
+    let checked = 0;
     for (const product_template_id of templateIds) {
+      if (checked >= MAX_TEMPLATES_TO_CHECK) {
+        console.warn(
+          `[${context.brandId}/${barcode}] Hit template limit (${MAX_TEMPLATES_TO_CHECK}), stopping search`
+        );
+        break;
+      }
+      checked++;
+
       const result = await safePost(
         postUrl,
         {

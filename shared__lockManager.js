@@ -6,9 +6,15 @@
  * document listeners on the main globalProducts collection.
  *
  * Structure: globalProducts/{id}/locks/{lockType}
+ *
+ * IMPORTANT: This module requires a Firestore composite index for cleanupExpiredLocks:
+ * Collection Group: locks
+ * Fields: expiresAt (Ascending)
+ *
+ * Deploy via firestore.indexes.json or Firebase Console before using cleanupExpiredLocks.
  */
 
-import { db, FieldValue } from "./firebase.js";
+import { db, FieldValue, Timestamp } from "./firebase.js";
 import { LOCK_TTL_MS } from "./config.js";
 
 /**
@@ -57,9 +63,26 @@ export async function tryAcquireLock(
         const lock = lockDoc.data();
 
         if (lock && lock.lockedAt) {
-          const lockTimestamp = lock.lockedAt.toMillis
-            ? lock.lockedAt.toMillis()
-            : new Date(lock.lockedAt).getTime();
+          // FIX: Consistent timestamp handling - lockedAt is always a Firestore Timestamp
+          let lockTimestamp;
+          if (lock.lockedAt.toMillis) {
+            lockTimestamp = lock.lockedAt.toMillis();
+          } else if (lock.lockedAt._seconds !== undefined) {
+            // Handle Firestore Timestamp serialized format
+            lockTimestamp =
+              lock.lockedAt._seconds * 1000 +
+              (lock.lockedAt._nanoseconds || 0) / 1000000;
+          } else {
+            // Fallback: try parsing as date string (shouldn't happen with proper writes)
+            lockTimestamp = new Date(lock.lockedAt).getTime();
+            if (isNaN(lockTimestamp)) {
+              console.warn(
+                `[${requestId}] Invalid lockedAt format, treating as expired`
+              );
+              lockTimestamp = 0;
+            }
+          }
+
           const lockAge = Date.now() - lockTimestamp;
 
           if (lockAge < LOCK_TTL_MS) {
@@ -82,14 +105,17 @@ export async function tryAcquireLock(
         }
       }
 
-      // Acquire the lock
+      // Acquire the lock - use Firestore Timestamp consistently
+      const now = Timestamp.now();
+      const expiresAt = Timestamp.fromMillis(now.toMillis() + LOCK_TTL_MS);
+
       transaction.set(lockRef, {
         lockedAt: FieldValue.serverTimestamp(),
         lockedBy: requestId,
         lockType,
         globalProductId,
-        startedAt: new Date().toISOString(),
-        expiresAt: new Date(Date.now() + LOCK_TTL_MS).toISOString(),
+        startedAt: now,
+        expiresAt: expiresAt,
         extensionCount: 0,
       });
 
@@ -190,10 +216,13 @@ export async function extendLock(
       const lock = lockDoc.data();
 
       if (lock && lock.lockedBy === requestId) {
+        const now = Timestamp.now();
+        const expiresAt = Timestamp.fromMillis(now.toMillis() + LOCK_TTL_MS);
+
         transaction.update(lockRef, {
           lockedAt: FieldValue.serverTimestamp(),
-          expiresAt: new Date(Date.now() + LOCK_TTL_MS).toISOString(),
-          extendedAt: new Date().toISOString(),
+          expiresAt: expiresAt,
+          extendedAt: now,
           extensionCount: (lock.extensionCount || 0) + 1,
         });
         console.log(
@@ -232,9 +261,21 @@ export async function checkLockStatus(
       return { locked: false };
     }
 
-    const lockTimestamp = lock.lockedAt.toMillis
-      ? lock.lockedAt.toMillis()
-      : new Date(lock.lockedAt).getTime();
+    // FIX: Consistent timestamp handling
+    let lockTimestamp;
+    if (lock.lockedAt.toMillis) {
+      lockTimestamp = lock.lockedAt.toMillis();
+    } else if (lock.lockedAt._seconds !== undefined) {
+      lockTimestamp =
+        lock.lockedAt._seconds * 1000 +
+        (lock.lockedAt._nanoseconds || 0) / 1000000;
+    } else {
+      lockTimestamp = new Date(lock.lockedAt).getTime();
+      if (isNaN(lockTimestamp)) {
+        return { locked: false, reason: "invalid_timestamp" };
+      }
+    }
+
     const lockAge = Date.now() - lockTimestamp;
 
     if (lockAge >= LOCK_TTL_MS) {
@@ -256,21 +297,31 @@ export async function checkLockStatus(
  * Clean up expired locks (maintenance function)
  * Can be called periodically via Cloud Scheduler
  *
+ * IMPORTANT: Requires Firestore index on collection group "locks" with field "expiresAt" (Ascending)
+ * Without this index, the query will fail with FAILED_PRECONDITION error.
+ *
  * @param {number} batchSize - Number of locks to check per call
  * @returns {Promise<{cleaned: number, errors: number}>}
  */
 export async function cleanupExpiredLocks(batchSize = 500) {
-  const cutoffTime = new Date(Date.now() - LOCK_TTL_MS);
+  // FIX: Use Firestore Timestamp for comparison (must match stored type)
+  const cutoffTimestamp = Timestamp.fromMillis(Date.now() - LOCK_TTL_MS);
   let cleaned = 0;
   let errors = 0;
 
   try {
     // Query all lock subcollections using collection group
+    // NOTE: This requires a composite index on collection group "locks" with expiresAt field
     const expiredLocks = await db
       .collectionGroup("locks")
-      .where("expiresAt", "<", cutoffTime.toISOString())
+      .where("expiresAt", "<", cutoffTimestamp)
       .limit(batchSize)
       .get();
+
+    if (expiredLocks.empty) {
+      console.log("[LockCleanup] No expired locks found");
+      return { cleaned: 0, errors: 0 };
+    }
 
     const batch = db.batch();
 
@@ -284,7 +335,14 @@ export async function cleanupExpiredLocks(batchSize = 500) {
       console.log(`[LockCleanup] Cleaned ${cleaned} expired locks`);
     }
   } catch (error) {
-    console.error(`[LockCleanup] Error: ${error.message}`);
+    // Provide helpful error message for missing index
+    if (error.code === 9 || error.message.includes("index")) {
+      console.error(
+        `[LockCleanup] Missing Firestore index. Create a composite index on collection group "locks" with field "expiresAt" (Ascending). Error: ${error.message}`
+      );
+    } else {
+      console.error(`[LockCleanup] Error: ${error.message}`);
+    }
     errors++;
   }
 

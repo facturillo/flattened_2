@@ -4,6 +4,9 @@ import { db } from "./firebase.js";
 // Based on 200 requests per minute, the minimum delay between requests is ~300ms.
 const MIN_DELAY = Math.ceil(60000 / 200); // 300ms
 
+// Timeout for Vertex AI calls (2 minutes)
+const VERTEX_AI_TIMEOUT_MS = 120000;
+
 // Helper: snip out the first `{…}` block from a string and parse it,
 // or return an empty object on failure.
 function extractJsonObject(text) {
@@ -22,8 +25,20 @@ function extractJsonObject(text) {
 }
 
 /**
+ * Helper: Create a timeout promise that rejects after specified ms
+ */
+function createTimeoutPromise(ms, operation = "Vertex AI call") {
+  return new Promise((_, reject) => {
+    setTimeout(() => {
+      reject(new Error(`${operation} timed out after ${ms}ms`));
+    }, ms);
+  });
+}
+
+/**
  * Helper function: vertexAICall
- * Wraps a Vertex AI model.generateContent call with exponential backoff on 429 errors.
+ * Wraps a Vertex AI model.generateContent call with exponential backoff on 429 errors
+ * and timeout protection.
  */
 async function vertexAICall(
   modelName,
@@ -62,7 +77,14 @@ async function vertexAICall(
 
   while (attempt < maxRetries) {
     try {
-      const result = await ai.models.generateContent(modelInput);
+      // FIX: Add timeout protection to prevent hanging forever
+      const result = await Promise.race([
+        ai.models.generateContent(modelInput),
+        createTimeoutPromise(
+          VERTEX_AI_TIMEOUT_MS,
+          `Vertex AI generateContent (attempt ${attempt + 1})`
+        ),
+      ]);
       return { result, modelConfig: config };
     } catch (err) {
       const errorCode =
@@ -71,10 +93,15 @@ async function vertexAICall(
           err.response.data &&
           err.response.data.error &&
           err.response.data.error.code);
-      if (errorCode === 429) {
+
+      // Check if it's a timeout error
+      const isTimeout = err.message && err.message.includes("timed out");
+
+      if (errorCode === 429 || isTimeout) {
         attempt++;
+        const reason = isTimeout ? "timeout" : "429";
         console.log(
-          `Vertex AI call returned 429. Retrying attempt ${attempt} after ${delay}ms...`
+          `Vertex AI call returned ${reason}. Retrying attempt ${attempt} after ${delay}ms...`
         );
         await new Promise((resolve) => setTimeout(resolve, delay));
         delay *= 2; // exponential backoff

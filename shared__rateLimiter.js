@@ -11,53 +11,57 @@ const DOMAIN_LIMITS = {
   // ═══════════════════════════════════════════════════════════════════════════
   // TIER 1: ENTERPRISE APIs - Built for high volume
   // ═══════════════════════════════════════════════════════════════════════════
-  "algolia.net": { rate: 50, burst: 80 }, // Was 30/50 - Algolia handles 1000s/sec
-  "adobe.io": { rate: 40, burst: 60 }, // Was 20/35 - Adobe Commerce is robust
-  "instaleap.io": { rate: 40, burst: 60 }, // Was 20/35 - Built for grocery scale
-  "searchserverapi1.com": { rate: 30, burst: 50 }, // Was 15/25
-  "fastsimon.com": { rate: 30, burst: 50 }, // Was 15/25
+  "algolia.net": { rate: 50, burst: 80 },
+  "adobe.io": { rate: 40, burst: 60 },
+  "instaleap.io": { rate: 40, burst: 60 },
+  "searchserverapi1.com": { rate: 30, burst: 50 },
+  "fastsimon.com": { rate: 30, burst: 50 },
 
   // ═══════════════════════════════════════════════════════════════════════════
   // TIER 2: MAJOR RETAILERS - Solid infrastructure
   // ═══════════════════════════════════════════════════════════════════════════
-  "super99.com": { rate: 25, burst: 40 }, // Was 15/25 - Adobe Commerce API
-  "smrey.com": { rate: 25, burst: 40 }, // Was 15/25 - Instaleap backend
-  "elmachetazo.com": { rate: 20, burst: 35 }, // Was 10/20 - VTEX handles traffic
-  "superxtra.com": { rate: 20, burst: 35 }, // Was 10/20 - VTEX
-  "arrocha.com": { rate: 20, burst: 35 }, // Was 10/20 - Large chain
+  "super99.com": { rate: 25, burst: 40 },
+  "smrey.com": { rate: 25, burst: 40 },
+  "elmachetazo.com": { rate: 20, burst: 35 },
+  "superxtra.com": { rate: 20, burst: 35 },
+  "arrocha.com": { rate: 20, burst: 35 },
 
   // ═══════════════════════════════════════════════════════════════════════════
   // TIER 3: MID-SIZE RETAIL - Good capacity
   // ═══════════════════════════════════════════════════════════════════════════
-  "ribasmith.com": { rate: 15, burst: 25 }, // Was 10/15
-  "novey.com.pa": { rate: 15, burst: 25 }, // Was 8/15 - Algolia-powered
-  "doitcenter.com.pa": { rate: 15, burst: 25 }, // Was 8/15 - Algolia-powered
-  "panafoto.com": { rate: 15, burst: 25 }, // Was 8/15 - Algolia-powered
-  "felipemotta.store": { rate: 15, burst: 25 }, // Was 8/15 - Algolia-powered
-  "conwayclick.com": { rate: 15, burst: 25 }, // Was 8/15 - Magento
-  "stevens.com.pa": { rate: 15, burst: 25 }, // Was 8/15 - Magento
-  "supercarnes.com": { rate: 15, burst: 25 }, // Was 8/15 - Magento
+  "ribasmith.com": { rate: 15, burst: 25 },
+  "novey.com.pa": { rate: 15, burst: 25 },
+  "doitcenter.com.pa": { rate: 15, burst: 25 },
+  "panafoto.com": { rate: 15, burst: 25 },
+  "felipemotta.store": { rate: 15, burst: 25 },
+  "conwayclick.com": { rate: 15, burst: 25 },
+  "stevens.com.pa": { rate: 15, burst: 25 },
+  "supercarnes.com": { rate: 15, burst: 25 },
 
   // ═══════════════════════════════════════════════════════════════════════════
   // TIER 4: SHOPIFY - Platform is resilient
   // ═══════════════════════════════════════════════════════════════════════════
-  "superbaru.com": { rate: 12, burst: 20 }, // Was 8/15
-  "felix.com.pa": { rate: 12, burst: 20 }, // Was 8/15
-  "titan.com.pa": { rate: 12, burst: 20 }, // Was 8/15
-  "americanpetspanama.com": { rate: 10, burst: 18 }, // Was 6/12
-  "melopetandgarden.com": { rate: 10, burst: 18 }, // Was 6/12
+  "superbaru.com": { rate: 12, burst: 20 },
+  "felix.com.pa": { rate: 12, burst: 20 },
+  "titan.com.pa": { rate: 12, burst: 20 },
+  "americanpetspanama.com": { rate: 10, burst: 18 },
+  "melopetandgarden.com": { rate: 10, burst: 18 },
 
   // ═══════════════════════════════════════════════════════════════════════════
   // TIER 5: SMALLER SITES - Still conservative
   // ═══════════════════════════════════════════════════════════════════════════
-  "blackdogpanama.com": { rate: 8, burst: 15 }, // Was 5/10 - Odoo
+  "blackdogpanama.com": { rate: 8, burst: 15 },
 };
 
-const DEFAULT_RATE = 10; // Was 6
-const DEFAULT_BURST = 18; // Was 12
+const DEFAULT_RATE = 10;
+const DEFAULT_BURST = 18;
 
 // Higher queue depth for aggressive batching
-const MAX_QUEUE_DEPTH = 10000; // Was 5000
+const MAX_QUEUE_DEPTH = 10000;
+
+// FIX: Idle bucket cleanup settings
+const BUCKET_IDLE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+const BUCKET_CLEANUP_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
 
 function extractDomain(url) {
   try {
@@ -209,3 +213,26 @@ setInterval(() => {
     console.log("[RateLimiter] Active queues:", JSON.stringify(stats));
   }
 }, 30000);
+
+// FIX: Cleanup idle buckets to prevent memory leak
+setInterval(() => {
+  const now = Date.now();
+  let cleanedCount = 0;
+
+  for (const [domain, bucket] of buckets) {
+    // Remove buckets that have been idle and have no waiters
+    const isIdle = now - bucket.lastRefill > BUCKET_IDLE_TTL_MS;
+    const hasNoWaiters = bucket.waiting.length === 0;
+
+    if (isIdle && hasNoWaiters) {
+      buckets.delete(domain);
+      cleanedCount++;
+    }
+  }
+
+  if (cleanedCount > 0) {
+    console.log(
+      `[RateLimiter] Cleaned ${cleanedCount} idle buckets, ${buckets.size} remaining`
+    );
+  }
+}, BUCKET_CLEANUP_INTERVAL_MS);

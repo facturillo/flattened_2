@@ -13,9 +13,8 @@ export async function getProductData(website, barcode, productUrl) {
   const context = { brandId: "conway", barcode, method: "getProductData" };
 
   return withErrorHandling(async () => {
-    const response = new ProductResponse();
-
     if (productUrl) {
+      const response = new ProductResponse();
       const result = await safeGet(productUrl, {}, context);
       if (!result.success) return null;
 
@@ -102,21 +101,23 @@ export async function getProductData(website, barcode, productUrl) {
           return null;
         }
 
-        response.url = url;
-        response.enhancedData.name = (item.name || "").trim();
-        response.enhancedData.description = safeDataGet(
+        // FIX: Create a new ProductResponse for each task to avoid race condition
+        const itemResponse = new ProductResponse();
+        itemResponse.url = url;
+        itemResponse.enhancedData.name = (item.name || "").trim();
+        itemResponse.enhancedData.description = safeDataGet(
           item,
           "description.html",
           ""
         );
-        response.enhancedData.categories = safeArray(item.categories).map(
+        itemResponse.enhancedData.categories = safeArray(item.categories).map(
           (c) => c.name
         );
-        response.enhancedData.price =
+        itemResponse.enhancedData.price =
           safeDataGet(item, "price_range.maximum_price.final_price.value") ??
           safeDataGet(item, "price_range.minimum_price.final_price.value") ??
           0.0;
-        return response;
+        return itemResponse;
       })()
     );
 
