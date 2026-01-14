@@ -223,15 +223,10 @@ export async function algolia(
 
       headers = {
         ...headers,
-        "Content-Type": "application/x-www-form-urlencoded",
+        "Content-Type": "application/json",
       };
 
-      const result = await safePost(
-        endpoint,
-        JSON.stringify(body),
-        { headers },
-        context
-      );
+      const result = await safePost(endpoint, body, { headers }, context);
       if (!result.success) return null;
 
       const hits = safeArray(safeDataGet(result.data, "results.0.hits"));

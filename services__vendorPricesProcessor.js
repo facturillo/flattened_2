@@ -99,28 +99,45 @@ export async function processVendorPrices({ globalProductId, dateKey }) {
 
   try {
     // ═══════════════════════════════════════════════════════════════════════════
-    // MAIN PROCESSING LOGIC
+    // PHASE 1: INITIAL READS (outside transaction - for external API calls)
+    // These reads inform which external APIs to call, not transaction writes
     // ═══════════════════════════════════════════════════════════════════════════
 
-    // 1) Load master doc to get all EAN variants
     const masterSnap = await globalProductRef.get();
+    if (!masterSnap.exists) {
+      console.error(`[${requestId}] Global product not found after lock`);
+      return {
+        status: 404,
+        shouldNack: false,
+        message: "Global product not found",
+      };
+    }
+
     const masterData = masterSnap.data() || {};
     const globalName = masterData.name;
     const eanVariants = (masterData.eanCodeVariations || []).map(
       (v) => v.barcode
     );
 
-    // 2) Fetch all currently active vendorBrands
-    const vendorBrandsSnap = await globalProductRef
+    // Get initial vendorBrands snapshot for enhancement (may become stale)
+    const initialVendorBrandsSnap = await globalProductRef
       .collection("vendorBrands")
       .where("active", "==", true)
       .get();
 
-    // 3) In parallel, enhance each existing vendorBrand (using skuCode + URL)
-    const existingEnhancementPromises = vendorBrandsSnap.docs.map(
-      async (doc) => {
-        const brand = doc.id;
-        const { skuCode, url } = doc.data();
+    // ═══════════════════════════════════════════════════════════════════════════
+    // PHASE 2: EXTERNAL API CALLS (must be outside transaction)
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    // Enhance each existing vendorBrand (using skuCode + URL)
+    const existingBrandsToEnhance = initialVendorBrandsSnap.docs.map((doc) => ({
+      brand: doc.id,
+      skuCode: doc.data().skuCode,
+      url: doc.data().url,
+    }));
+
+    const existingEnhancementPromises = existingBrandsToEnhance.map(
+      async ({ brand, skuCode, url }) => {
         try {
           const result = await getEnhancedData(brand, skuCode || null, url);
           const enhanced = result?.enhancedProductData;
@@ -134,18 +151,20 @@ export async function processVendorPrices({ globalProductId, dateKey }) {
         return null;
       }
     );
+
     const existingHits = (
       await Promise.all(existingEnhancementPromises)
     ).filter(Boolean);
 
-    // 4) Determine which brands never returned a price
-    const processedBrands = new Set(existingHits.map((h) => h.brand));
-    const missingBrands = ALL_BRANDS.filter(
-      (brand) => !processedBrands.has(brand)
+    // Determine which brands returned a price from existing vendorBrands
+    const existingBrandsWithPrice = new Set(existingHits.map((h) => h.brand));
+
+    // For brands not in existing vendorBrands OR that failed, try all EAN variants
+    const brandsToSearch = ALL_BRANDS.filter(
+      (brand) => !existingBrandsWithPrice.has(brand)
     );
 
-    // 5) For missing brands, fire ALL EAN variants in parallel per brand
-    const missingEnhancementPromises = missingBrands.map(async (brand) => {
+    const missingEnhancementPromises = brandsToSearch.map(async (brand) => {
       if (eanVariants.length === 0) return null;
 
       const attempts = eanVariants.map(async (code) => {
@@ -170,10 +189,11 @@ export async function processVendorPrices({ globalProductId, dateKey }) {
       Boolean
     );
 
-    // Compute combined hits
+    // Combine all successful enhancements
     const allHits = [...existingHits, ...missingHits];
+    const allHitsMap = new Map(allHits.map((h) => [h.brand, h]));
 
-    // Find the new lowest price hit
+    // Find the lowest price hit
     let newLowest = null;
     for (const hit of allHits) {
       const price = hit.enhanced.enhancedData.price;
@@ -188,102 +208,189 @@ export async function processVendorPrices({ globalProductId, dateKey }) {
       nowTimestamp.toDate().getTime() - 7 * 24 * 60 * 60 * 1000
     );
 
-    // Prepare info on existing docs that never succeeded
-    const failureInfos = vendorBrandsSnap.docs
-      .filter((doc) => !processedBrands.has(doc.id))
-      .map((doc) => ({
-        brand: doc.id,
-        lastFetchDate: doc.data().lastFetchDate,
-      }));
+    // ═══════════════════════════════════════════════════════════════════════════
+    // PHASE 3: TRANSACTION (atomic reads + writes)
+    // Re-read vendorBrands inside transaction for consistency
+    // ═══════════════════════════════════════════════════════════════════════════
 
-    // Calculate new activeVendorBrands count
-    const currentActiveBrands = new Set(vendorBrandsSnap.docs.map((d) => d.id));
-    const brandsToDeactivate = new Set(
-      failureInfos
-        .filter((f) => f.lastFetchDate && f.lastFetchDate.toDate() < cutoffDate)
-        .map((f) => f.brand)
-    );
-    const newActiveBrands = new Set(missingHits.map((h) => h.brand));
+    const transactionResult = await db.runTransaction(async (transaction) => {
+      // Re-read master doc to ensure it still exists
+      const freshMasterSnap = await transaction.get(globalProductRef);
+      if (!freshMasterSnap.exists) {
+        throw new Error("Global product deleted during processing");
+      }
 
-    // Final active count: current - deactivated + newly added
-    const finalActiveCount =
-      currentActiveBrands.size -
-      brandsToDeactivate.size +
-      [...newActiveBrands].filter((b) => !currentActiveBrands.has(b)).length;
+      // Re-read ALL vendorBrands (not just active) to get fresh state
+      // Note: We read all docs individually since we need transaction consistency
+      const vendorBrandsRef = globalProductRef.collection("vendorBrands");
 
-    // 6) Commit all updates and creates in a single transaction
-    await db.runTransaction(async (transaction) => {
-      // Deactivate repeated failures older than 7 days
-      for (const { brand, lastFetchDate } of failureInfos) {
-        if (lastFetchDate && lastFetchDate.toDate() < cutoffDate) {
-          const vbRef = globalProductRef.collection("vendorBrands").doc(brand);
+      // Get all vendorBrand doc IDs we might need to read/write
+      const allRelevantBrands = new Set([
+        ...existingBrandsToEnhance.map((b) => b.brand),
+        ...missingHits.map((h) => h.brand),
+      ]);
+
+      // Read each vendorBrand document inside transaction
+      const freshVendorBrandDocs = new Map();
+      for (const brand of allRelevantBrands) {
+        const docRef = vendorBrandsRef.doc(brand);
+        const docSnap = await transaction.get(docRef);
+        freshVendorBrandDocs.set(brand, {
+          ref: docRef,
+          exists: docSnap.exists,
+          data: docSnap.exists ? docSnap.data() : null,
+        });
+      }
+
+      // Track stats
+      let deactivatedCount = 0;
+      let updatedCount = 0;
+      let createdCount = 0;
+
+      // Process existing vendorBrands
+      for (const [brand, docInfo] of freshVendorBrandDocs) {
+        if (!docInfo.exists) continue;
+
+        const data = docInfo.data;
+        const hit = allHitsMap.get(brand);
+
+        if (hit) {
+          // Success - update the vendorBrand and write today's price
           transaction.set(
-            vbRef,
+            docInfo.ref,
             {
-              active: false,
+              lastFetchDate: FieldValue.serverTimestamp(),
+              lastPrice: hit.enhanced.enhancedData.price,
+              url: hit.enhanced.url, // Update URL in case it changed
+              active: true, // Ensure it's active
               _batchContext: BATCH_CONTEXT,
               _batchRequestId: requestId,
               _batchUpdatedAt: FieldValue.serverTimestamp(),
             },
             { merge: true }
           );
+
+          const vpRef = globalProductRef
+            .collection("vendorPrices")
+            .doc(generateDocIdSync(`${brand}_${dateKey}`));
+
+          transaction.set(vpRef, {
+            brandRef: db.collection("vendorBrands").doc(brand),
+            price: hit.enhanced.enhancedData.price,
+            fetchDate: FieldValue.serverTimestamp(),
+            active: true,
+          });
+
+          updatedCount++;
+        } else if (data.active === true) {
+          // Failed to get price - check if we should deactivate
+          const lastFetchDate = data.lastFetchDate;
+          if (lastFetchDate && lastFetchDate.toDate() < cutoffDate) {
+            // Deactivate after 7 days of failures
+            transaction.set(
+              docInfo.ref,
+              {
+                active: false,
+                _batchContext: BATCH_CONTEXT,
+                _batchRequestId: requestId,
+                _batchUpdatedAt: FieldValue.serverTimestamp(),
+              },
+              { merge: true }
+            );
+            deactivatedCount++;
+          }
         }
       }
 
-      // Update existing vendorBrands and write today's price
-      for (const { brand, enhanced } of existingHits) {
-        const vbRef = globalProductRef.collection("vendorBrands").doc(brand);
-        const vpRef = globalProductRef
-          .collection("vendorPrices")
-          .doc(generateDocIdSync(`${brand}_${dateKey}`));
+      // Create new vendorBrands from missing hits
+      for (const hit of missingHits) {
+        const docInfo = freshVendorBrandDocs.get(hit.brand);
 
-        transaction.set(
-          vbRef,
-          {
-            lastFetchDate: FieldValue.serverTimestamp(),
-            lastPrice: enhanced.enhancedData.price,
-            _batchContext: BATCH_CONTEXT,
-            _batchRequestId: requestId,
-            _batchUpdatedAt: FieldValue.serverTimestamp(),
-          },
-          { merge: true }
-        );
-        transaction.set(vpRef, {
-          brandRef: db.collection("vendorBrands").doc(brand),
-          price: enhanced.enhancedData.price,
-          fetchDate: FieldValue.serverTimestamp(),
-          active: true,
-        });
+        // Only create if it doesn't exist (could have been created by another process)
+        if (!docInfo || !docInfo.exists) {
+          const vbRef = vendorBrandsRef.doc(hit.brand);
+          transaction.set(
+            vbRef,
+            {
+              active: true,
+              brandRef: db.collection("vendorBrands").doc(hit.brand),
+              url: hit.enhanced.url,
+              skuCode: hit.enhanced.skuCode || null,
+              lastFetchDate: FieldValue.serverTimestamp(),
+              lastPrice: hit.enhanced.enhancedData.price,
+              _batchContext: BATCH_CONTEXT,
+              _batchRequestId: requestId,
+              _batchCreatedAt: FieldValue.serverTimestamp(),
+            },
+            { merge: true }
+          );
+
+          const vpRef = globalProductRef
+            .collection("vendorPrices")
+            .doc(generateDocIdSync(`${hit.brand}_${dateKey}`));
+
+          transaction.set(vpRef, {
+            brandRef: db.collection("vendorBrands").doc(hit.brand),
+            price: hit.enhanced.enhancedData.price,
+            fetchDate: FieldValue.serverTimestamp(),
+            active: true,
+          });
+
+          createdCount++;
+        } else if (docInfo.exists) {
+          // Document exists but wasn't in our initial active query
+          // (could be inactive) - update it
+          transaction.set(
+            docInfo.ref,
+            {
+              active: true,
+              url: hit.enhanced.url,
+              skuCode: hit.enhanced.skuCode || null,
+              lastFetchDate: FieldValue.serverTimestamp(),
+              lastPrice: hit.enhanced.enhancedData.price,
+              _batchContext: BATCH_CONTEXT,
+              _batchRequestId: requestId,
+              _batchUpdatedAt: FieldValue.serverTimestamp(),
+            },
+            { merge: true }
+          );
+
+          const vpRef = globalProductRef
+            .collection("vendorPrices")
+            .doc(generateDocIdSync(`${hit.brand}_${dateKey}`));
+
+          transaction.set(vpRef, {
+            brandRef: db.collection("vendorBrands").doc(hit.brand),
+            price: hit.enhanced.enhancedData.price,
+            fetchDate: FieldValue.serverTimestamp(),
+            active: true,
+          });
+
+          updatedCount++;
+        }
       }
 
-      // Create any missing vendorBrands + their first price entry
-      for (const { brand, enhanced } of missingHits) {
-        const vbRef = globalProductRef.collection("vendorBrands").doc(brand);
-        const vpRef = globalProductRef
-          .collection("vendorPrices")
-          .doc(generateDocIdSync(`${brand}_${dateKey}`));
+      // Calculate final active count based on fresh data
+      let finalActiveCount = 0;
+      for (const [brand, docInfo] of freshVendorBrandDocs) {
+        const hit = allHitsMap.get(brand);
+        const wasActive = docInfo.exists && docInfo.data?.active === true;
+        const willBeDeactivated =
+          wasActive &&
+          !hit &&
+          docInfo.data?.lastFetchDate?.toDate() < cutoffDate;
 
-        transaction.set(
-          vbRef,
-          {
-            active: true,
-            brandRef: db.collection("vendorBrands").doc(brand),
-            url: enhanced.url,
-            skuCode: enhanced.skuCode || null,
-            lastFetchDate: FieldValue.serverTimestamp(),
-            lastPrice: enhanced.enhancedData.price,
-            _batchContext: BATCH_CONTEXT,
-            _batchRequestId: requestId,
-            _batchUpdatedAt: FieldValue.serverTimestamp(),
-          },
-          { merge: true }
-        );
-        transaction.set(vpRef, {
-          brandRef: db.collection("vendorBrands").doc(brand),
-          price: enhanced.enhancedData.price,
-          fetchDate: FieldValue.serverTimestamp(),
-          active: true,
-        });
+        if (hit || (wasActive && !willBeDeactivated)) {
+          finalActiveCount++;
+        }
+      }
+
+      // Add newly created brands
+      for (const hit of missingHits) {
+        const docInfo = freshVendorBrandDocs.get(hit.brand);
+        if (!docInfo || !docInfo.exists) {
+          finalActiveCount++;
+        }
       }
 
       // Update globalProduct with bestPrice AND activeVendorBrands
@@ -303,12 +410,20 @@ export async function processVendorPrices({ globalProductId, dateKey }) {
       }
 
       transaction.set(globalProductRef, globalProductUpdate, { merge: true });
+
+      return {
+        updatedCount,
+        createdCount,
+        deactivatedCount,
+        finalActiveCount,
+      };
     });
 
     console.log(
-      `[${requestId}] Completed: ${existingHits.length} existing, ` +
-        `${missingHits.length} new, ${failureInfos.length} failures tracked, ` +
-        `activeVendorBrands: ${finalActiveCount}`
+      `[${requestId}] Completed: ${transactionResult.updatedCount} updated, ` +
+        `${transactionResult.createdCount} created, ` +
+        `${transactionResult.deactivatedCount} deactivated, ` +
+        `activeVendorBrands: ${transactionResult.finalActiveCount}`
     );
 
     return {
@@ -319,7 +434,7 @@ export async function processVendorPrices({ globalProductId, dateKey }) {
         existingHits: existingHits.length,
         missingHits: missingHits.length,
         totalBrands: allHits.length,
-        activeVendorBrands: finalActiveCount,
+        ...transactionResult,
       },
     };
   } catch (error) {

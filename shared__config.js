@@ -55,7 +55,7 @@ export const TEMPORARY_PRODUCT_TTL_HOURS = 24;
 /**
  * Maximum age for stale locks before override (in ms)
  */
-export const LOCK_TTL_MS = parseInt(process.env.LOCK_TTL_MS || "1200000"); // 20 minutes
+export const LOCK_TTL_MS = parseInt(process.env.LOCK_TTL_MS, 10) || 1200000;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // PROCESSING FLAGS

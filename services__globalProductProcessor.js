@@ -187,9 +187,14 @@ export async function processGlobalProduct({
       }
 
       // Don't await - let them run in background, but track results
-      Promise.allSettled(enhancementPromises).then((results) => {
-        trackEnhancementResults(globalProductRef, results);
-      });
+      Promise.allSettled(enhancementPromises)
+        .then((results) => trackEnhancementResults(globalProductRef, results))
+        .catch((err) =>
+          console.error(
+            `[${requestId}] trackEnhancementResults failed:`,
+            err.message
+          )
+        );
 
       // ═══════════════════════════════════════════════════════════════════
       // TEMPORARY PRODUCT HANDLING
