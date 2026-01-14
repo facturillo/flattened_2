@@ -23,6 +23,9 @@ export async function graphQl({ endpoint, query, variables }, context = {}) {
 }
 
 export async function webPixels(website, barcode, context = {}) {
+  // Use local context with proper method name to avoid duplicate logs
+  const localContext = { ...context, method: "webPixels" };
+
   return withErrorHandling(async () => {
     const baseDomain = website.replace(/\/+$/, "");
     const searchUrl = `${baseDomain}/search?type=product&q=${encodeURIComponent(
@@ -30,9 +33,11 @@ export async function webPixels(website, barcode, context = {}) {
     )}`;
     const response = new ProductResponse();
 
-    const searchResult = await safeGet(searchUrl, {}, context);
+    const searchResult = await safeGet(searchUrl, {}, localContext);
     if (!searchResult.success) {
-      console.debug(`[${context.brandId}/${barcode}] Search page fetch failed`);
+      console.debug(
+        `[${localContext.brandId}/${barcode}] Search page fetch failed`
+      );
       return null;
     }
 
@@ -41,7 +46,7 @@ export async function webPixels(website, barcode, context = {}) {
     const pixelsScript = $search("script#web-pixels-manager-setup").html();
     if (!pixelsScript) {
       console.debug(
-        `[${context.brandId}/${barcode}] web-pixels-manager-setup script not found`
+        `[${localContext.brandId}/${barcode}] web-pixels-manager-setup script not found`
       );
       return null;
     }
@@ -51,7 +56,7 @@ export async function webPixels(website, barcode, context = {}) {
     );
     if (!payloadMatch) {
       console.debug(
-        `[${context.brandId}/${barcode}] search_submitted payload not found`
+        `[${localContext.brandId}/${barcode}] search_submitted payload not found`
       );
       return null;
     }
@@ -64,7 +69,7 @@ export async function webPixels(website, barcode, context = {}) {
         payload = runInNewContext(`(${payloadMatch[1]})`);
       } catch (err) {
         console.debug(
-          `[${context.brandId}/${barcode}] Payload parse failed:`,
+          `[${localContext.brandId}/${barcode}] Payload parse failed:`,
           err.message
         );
         return null;
@@ -77,7 +82,7 @@ export async function webPixels(website, barcode, context = {}) {
     const found = variants.find((v) => v.sku === barcode);
     if (!found) {
       console.debug(
-        `[${context.brandId}/${barcode}] No variant matching barcode found`
+        `[${localContext.brandId}/${barcode}] No variant matching barcode found`
       );
       return null;
     }
@@ -85,7 +90,7 @@ export async function webPixels(website, barcode, context = {}) {
     let productUrl = safeDataGet(found, "product.url");
     if (!productUrl) {
       console.debug(
-        `[${context.brandId}/${barcode}] No product URL in variant`
+        `[${localContext.brandId}/${barcode}] No product URL in variant`
       );
       return null;
     }
@@ -103,19 +108,22 @@ export async function webPixels(website, barcode, context = {}) {
     response.enhancedData.categories = safeDataGet(found, "product.type");
     response.enhancedData.brand = safeDataGet(found, "product.vendor");
 
-    const productResult = await safeGet(productUrl, {}, context);
+    const productResult = await safeGet(productUrl, {}, localContext);
     if (!productResult.success) {
       console.debug(
-        `[${context.brandId}/${barcode}] Product page fetch failed`
+        `[${localContext.brandId}/${barcode}] Product page fetch failed`
       );
       return null;
     }
 
     return { productHtml: productResult.data, response };
-  }, context);
+  }, localContext);
 }
 
 export async function searchserverapi(website, barcode, apiKey, context = {}) {
+  // Use local context with proper method name to avoid duplicate logs
+  const localContext = { ...context, method: "searchserverapi" };
+
   return withErrorHandling(async () => {
     const baseDomain = website.replace(/\/+$/, "");
     const response = new ProductResponse();
@@ -126,7 +134,7 @@ export async function searchserverapi(website, barcode, apiKey, context = {}) {
       `&maxResults=1` +
       `&q=${encodeURIComponent(barcode)}`;
 
-    const searchResult = await safeGet(searchEndpoint, {}, context);
+    const searchResult = await safeGet(searchEndpoint, {}, localContext);
     if (!searchResult.success) {
       return null;
     }
@@ -150,7 +158,7 @@ export async function searchserverapi(website, barcode, apiKey, context = {}) {
     }
     response.url = productUrl;
 
-    const productResult = await safeGet(productUrl, {}, context);
+    const productResult = await safeGet(productUrl, {}, localContext);
     if (!productResult.success) {
       return null;
     }
@@ -197,7 +205,7 @@ export async function searchserverapi(website, barcode, apiKey, context = {}) {
       originalBarcode,
       response,
     };
-  }, context);
+  }, localContext);
 }
 
 export async function algolia(
@@ -208,6 +216,9 @@ export async function algolia(
   defaultIndex,
   context = {}
 ) {
+  // Use local context with proper method name to avoid duplicate logs
+  const localContext = { ...context, method: "algolia" };
+
   return withErrorHandling(async () => {
     const response = new ProductResponse();
     const { protocol, host } = new URL(website);
@@ -228,7 +239,7 @@ export async function algolia(
         "Content-Type": "application/json",
       };
 
-      const result = await safePost(endpoint, body, { headers }, context);
+      const result = await safePost(endpoint, body, { headers }, localContext);
       if (!result.success) return null;
 
       const hits = safeArray(safeDataGet(result.data, "results.0.hits"));
@@ -248,7 +259,7 @@ export async function algolia(
       const searchPageUrl = `${baseDomain}/catalogsearch/result/?q=${encodeURIComponent(
         barcode
       )}`;
-      const searchResult = await safeGet(searchPageUrl, {}, context);
+      const searchResult = await safeGet(searchPageUrl, {}, localContext);
       if (!searchResult.success) return null;
 
       const $ = cheerio.load(searchResult.data);
@@ -273,17 +284,17 @@ export async function algolia(
         INDEX = indexName ?? null;
       } catch (err) {
         console.warn(
-          `[${context.brandId}/${barcode}] Failed to parse algoliaConfig:`,
+          `[${localContext.brandId}/${barcode}] Failed to parse algoliaConfig:`,
           err.message
         );
         return null;
       }
     }
 
-    // FIX: Guard against null/empty credentials after page parse
+    // Guard against null/empty credentials after page parse
     if (!APP_ID || !API_KEY || !INDEX) {
       console.debug(
-        `[${context.brandId}/${barcode}] Missing Algolia credentials after page parse`
+        `[${localContext.brandId}/${barcode}] Missing Algolia credentials after page parse`
       );
       return null;
     }
@@ -299,13 +310,16 @@ export async function algolia(
 
     response.url = hit.url;
     return { response, enhancedData: hit };
-  }, context);
+  }, localContext);
 }
 
 export async function extractLdJsonPrice(url, context = {}) {
+  // Use local context with proper method name to avoid duplicate logs
+  const localContext = { ...context, method: "extractLdJsonPrice" };
+
   return withErrorHandling(async () => {
     const response = new ProductResponse();
-    const result = await safeGet(url, {}, context);
+    const result = await safeGet(url, {}, localContext);
 
     if (!result.success) return null;
 
@@ -322,7 +336,7 @@ export async function extractLdJsonPrice(url, context = {}) {
       productData = JSON.parse(script.html());
     } catch (err) {
       console.warn(
-        `[${context.brandId}/${context.barcode}] Failed to parse LD+JSON:`,
+        `[${localContext.brandId}/${localContext.barcode}] Failed to parse LD+JSON:`,
         err.message
       );
       return null;
@@ -354,5 +368,5 @@ export async function extractLdJsonPrice(url, context = {}) {
     response.url = url;
     response.enhancedData.price = isNaN(price) ? 0 : price;
     return response;
-  }, context);
+  }, localContext);
 }
