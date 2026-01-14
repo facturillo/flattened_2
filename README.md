@@ -111,7 +111,6 @@ vendorPricesProcessor.js - Vendor prices processing
 systemInstructions/
 brand.js - AI instructions for brand detection
 category.js - AI instructions for categorization
-productInstructions.js - AI instructions for product parsing
 productDataExtractors/
 extractors.js - Extractor registry
 methods.js - Shared extraction methods

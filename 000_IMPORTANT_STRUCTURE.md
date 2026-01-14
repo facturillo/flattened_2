@@ -60,8 +60,7 @@ backend\product-management/
 │   └── vertexAI.js
 ├── systemInstructions/
 │   ├── brand.js
-│   ├── category.js
-│   └── productInstructions.js
+│   └── category.js
 ├── .dockerignore
 ├── .gcloudignore
 ├── cloudbuild.yaml
@@ -126,7 +125,6 @@ The files in this directory use the following naming convention:
 | `shared__vertexAI.js` | `shared\vertexAI.js` |
 | `systemInstructions__brand.js` | `systemInstructions\brand.js` |
 | `systemInstructions__category.js` | `systemInstructions\category.js` |
-| `systemInstructions__productInstructions.js` | `systemInstructions\productInstructions.js` |
 
 ## Instructions for AI Assistants
 
@@ -142,10 +140,10 @@ The files in this directory use the following naming convention:
 
 ## Quick Reference
 
-- **Total Files**: 46
+- **Total Files**: 45
 - **Source Directory**: `backend\product-management`
 - **Flattened To**: `flattened_2`
-- **Generated**: 2026-01-14T01:15:46.447Z
+- **Generated**: 2026-01-14T01:37:37.052Z
 
 ---
 

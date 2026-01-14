@@ -5,7 +5,7 @@ import admin, { db, FieldValue, Timestamp } from "../shared/firebase.js";
 import {
   systemInstruction,
   responseSchema,
-} from "../systemInstructions/productInstructions.js";
+} from "../systemInstructions/category.js";
 import { vertexAIExtraction } from "../shared/vertexAI.js";
 import { enhanceProduct, ProductResponse } from "./productEnhancer.js";
 import {

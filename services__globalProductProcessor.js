@@ -7,7 +7,10 @@ import {
   systemInstruction as categoryInstruction,
   responseSchema as categoryResponseSchema,
 } from "../systemInstructions/category.js";
-import { systemInstruction as brandInstruction } from "../systemInstructions/brand.js";
+import {
+  systemInstruction as brandInstruction,
+  responseSchema as brandResponseSchema,
+} from "../systemInstructions/brand.js";
 import { vertexAIExtraction } from "../shared/vertexAI.js";
 import { enhanceProduct } from "./productEnhancer.js";
 import {
@@ -391,13 +394,15 @@ export async function processGlobalProduct({
           productInputString,
           categoryInstruction,
           categoryResponseSchema,
-          "globalProductCategory"
+          "globalProductCategory",
+          false // No grounding needed for category
         );
         const brandPromise = vertexAIExtraction(
           productInputString,
           brandInstruction,
-          null,
-          "globalProductBrand"
+          brandResponseSchema, // <-- Now uses structured output
+          "globalProductBrand",
+          true // Enable Google Search grounding for brand detection
         );
 
         const [categoryResult, brandResult] = await Promise.all([

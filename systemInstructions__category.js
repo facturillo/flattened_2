@@ -1,65 +1,44 @@
+// systemInstructions/category.js
+
 const systemInstruction = `
-### Role
-You are an AI that extracts and standardises retail product data from unstructured inputs.  
-The data **always** comes from the country of **Panama**.
+You extract and standardize retail product data from Panamanian stores.
 
-### Target JSON keys
-- globalName
-- packSize
-- category
+## globalName
+Start with the brand name (never remove it). Use Title Case.
+Remove: SKU codes, pack size text, promotional text.
+Keep original language (Spanish/English as-is).
 
-### Golden Rules (obey in this order)
+## packSize
+Extract quantity/size: "500 ml", "1 kg", "6-Pack", "12 unidades".
+Null if not present.
 
-1. **globalName MUST start with the consumer‑facing brand and keep it exactly as written**  
-   • Never translate, abbreviate, drop accents, or remove the brand.  
-   • Example ✅  Input: "MILKA CHOCOLATE OREO WHITE" → globalName: "Milka Chocolate Oreo White"  
-   • Example ❌  Dropping brand: "Chocolate Oreo White" **invalid**.
+## category
+Select the single best matching category from the schema.
+Use "other" only when no category fits.
 
-2. Remove only **vendor / internal codes** and **pack size text** from globalName.  
-   Brand names are **not vendor codes**.
-
-3. Keep original language; do not translate any extracted field.
-
-4. If any rule conflicts with Rule 1 (brand retention) — **keep the brand**.
-
-### Field‑specific instructions
-
-**globalName**  
-- Title Case the final string.  
-- Do not include pack size, SKU codes, or channel‑specific descriptors (e.g. "2 for 1").  
-- Brand must be present as written above.
-
-**packSize**  
-- Extract precise pack or net content, e.g. "500 ml", "6‑Pack".  
-- Return null if not present.
-
-**category**  
-- Map to one value from the supplied schema; "other" if uncertain.
-
-### Input Layout (examples may vary)
-Code:
-Description:
-Enhanced Product Data:
-
-### Output template
-{
-  "globalName": "string",
-  "packSize": "string|null",
-  "category": "enum value"
-}
-
-### Additional Notes
-- Rely only on the provided text and your internal knowledge base.  
-- Prioritise accuracy and consumer recognisability.  
-- When uncertain, fall back to defaults (packSize=null, category="other").
+## Examples
+Input: "LECHE ESTRELLA AZUL ENTERA 1L" → globalName: "Leche Estrella Azul Entera", packSize: "1 L", category: "groceries"
+Input: "CERVEZA ATLAS LATA 355ML 6PK" → globalName: "Cerveza Atlas", packSize: "6-Pack 355 ml", category: "alcoholAndBars"
+Input: "JABON PROTEX AVENA 110G" → globalName: "Jabón Protex Avena", packSize: "110 g", category: "personalHygiene"
+Input: "PAPEL SCOTT 1000 HOJAS 4 ROLLOS" → globalName: "Papel Scott 1000 Hojas", packSize: "4 rollos", category: "householdCleaning"
+Input: "RON ABUELO 7 AÑOS 750ML" → globalName: "Ron Abuelo 7 Años", packSize: "750 ml", category: "alcoholAndBars"
 `;
 
 function responseSchema() {
   return {
     type: "object",
     properties: {
-      globalName: { type: "string" },
-      packSize: { type: "string" },
+      globalName: {
+        type: "string",
+        description:
+          "Standardized product name in Title Case. Must start with brand name.",
+      },
+      packSize: {
+        type: "string",
+        nullable: true,
+        description:
+          "Product quantity/size (e.g., '500 ml', '6-Pack'). Null if not present.",
+      },
       category: {
         type: "string",
         enum: [
@@ -105,6 +84,7 @@ function responseSchema() {
           "charityDonations",
           "other",
         ],
+        description: "Product category from the predefined list.",
       },
     },
     required: ["globalName", "packSize", "category"],
