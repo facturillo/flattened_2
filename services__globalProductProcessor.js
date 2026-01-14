@@ -1,8 +1,7 @@
 // product-management/services/globalProductProcessor.js
 
-import crypto from "crypto";
 import { PubSub } from "@google-cloud/pubsub";
-import admin, { db, FieldValue } from "../shared/firebase.js";
+import { db, FieldValue } from "../shared/firebase.js";
 import {
   systemInstruction as categoryInstruction,
   responseSchema as categoryResponseSchema,
@@ -18,8 +17,6 @@ import {
   TEMPORARY_PRODUCT_DELAY_SECONDS,
   TEMPORARY_PRODUCT_TTL_HOURS,
   generateDocIdSync,
-  formatAsYYYYMMDD,
-  getStartOfTodayTimestamp,
 } from "../shared/config.js";
 
 const pubsub = new PubSub();
@@ -394,15 +391,13 @@ export async function processGlobalProduct({
           productInputString,
           categoryInstruction,
           categoryResponseSchema,
-          "globalProductCategory",
-          false // No grounding needed for category
+          "globalProductCategory"
         );
         const brandPromise = vertexAIExtraction(
           productInputString,
           brandInstruction,
           brandResponseSchema, // <-- Now uses structured output
-          "globalProductBrand",
-          true // Enable Google Search grounding for brand detection
+          "globalProductBrand"
         );
 
         const [categoryResult, brandResult] = await Promise.all([

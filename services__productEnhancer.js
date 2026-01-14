@@ -1,7 +1,6 @@
 // product-management/services/productEnhancer.js
 
-import crypto from "crypto";
-import admin, { db, FieldValue, Timestamp } from "../shared/firebase.js";
+import { db, FieldValue, Timestamp } from "../shared/firebase.js";
 import { productDataEnhancer } from "../productDataExtractors/extractors.js";
 import {
   getBarcodeTypes,

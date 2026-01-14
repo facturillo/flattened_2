@@ -1,7 +1,6 @@
 // product-management/services/productProcessor.js
 
-import crypto from "crypto";
-import admin, { db, FieldValue, Timestamp } from "../shared/firebase.js";
+import { db, FieldValue, Timestamp } from "../shared/firebase.js";
 import {
   systemInstruction,
   responseSchema,

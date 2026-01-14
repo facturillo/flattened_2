@@ -1,6 +1,6 @@
 // product-management/services/vendorPricesProcessor.js
 
-import admin, { db, FieldValue, Timestamp } from "../shared/firebase.js";
+import { db, FieldValue, Timestamp } from "../shared/firebase.js";
 import { enhanceProduct } from "./productEnhancer.js";
 import {
   tryAcquireLock,

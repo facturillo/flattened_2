@@ -101,7 +101,7 @@ async function vertexAICall(
 // MAIN EXTRACTION FUNCTION
 // ═══════════════════════════════════════════════════════════════════════════
 
-async function vertexAIExtraction(
+export async function vertexAIExtraction(
   inputString,
   systemInstruction,
   responseSchema,
@@ -200,5 +200,3 @@ async function vertexAIExtraction(
     return null;
   }
 }
-
-export { vertexAIExtraction };

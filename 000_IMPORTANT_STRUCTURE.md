@@ -143,7 +143,7 @@ The files in this directory use the following naming convention:
 - **Total Files**: 45
 - **Source Directory**: `backend\product-management`
 - **Flattened To**: `flattened_2`
-- **Generated**: 2026-01-14T01:37:37.052Z
+- **Generated**: 2026-01-14T01:48:39.304Z
 
 ---
 
